@@ -1,26 +1,37 @@
 """
 orchestrator.py — the orchestrator agent that drives the full multi-agent pipeline.
 
+All inter-agent state is carried as typed Pydantic models (KnowledgeGraph,
+KGCompletenessResult, etc.).  Plain dicts are only used at the boundary
+where we serialise for LLM prompts or file output.
+
 Flow
 ────
-Phase 1 · Entity extraction (parallel-like, sequential calls)
-  └─ PeopleOrgsAgent + AssetsAgent + TransactionsAgent → KGConsolidationAgent
+Phase 1 · Entity extraction
+  PeopleOrgsAgent + AssetsAgent + TransactionsAgent → KGConsolidationAgent
 
 Phase 2 · Relationship extraction
-  └─ RelationshipAgent (page by page) → KGConsolidationAgent
+  RelationshipAgent (page by page) → KGConsolidationAgent
 
-Phase 3 · Stray node feedback loop
-  └─ StrayNodeAgent → (if resolved) KGConsolidationAgent → repeat
-     (if ontology_gap) → HALT and surface to user
+Phase 3 · Stray node feedback loop  [repeats until clean or ontology_gap HALT]
+  StrayNodeAgent → (resolved) KGConsolidationAgent → back to StrayNodeAgent
+               → (ontology_gap) HALT — user must refine ontology
 
-Phase 4 · KG completeness loop
-  └─ KGCompletenessJudge
-     → if needs_improvement:
-         _select_agents_from_feedback() inspects judge output and decides
-         which subset of agents to re-run (people/orgs, assets, transactions,
-         relationships) — only agents relevant to the flagged gaps are called.
-         → KGConsolidation → remove hallucinations → restart phase 3
-     → if complete → ContradictionAgent → DONE
+Phase 4 · KG completeness loop  [up to MAX_COMPLETENESS_ITERATIONS]
+  KGCompletenessJudge
+    → complete      → Phase 5
+    → needs_improvement:
+        _select_agents_from_feedback() maps judge output to the minimal set
+        of agents needed.  Each selected agent receives:
+          • the source document
+          • the EXISTING KG  (new in this version)
+          • the judge's feedback  (new in this version)
+        so it can both add missing items AND recommend removals in one pass.
+        → KGConsolidationAgent (applies additions + removals atomically)
+        → back to Phase 3
+
+Phase 5 · Contradiction spotting
+  ContradictionAgent → DONE
 """
 
 import json
@@ -34,68 +45,73 @@ from agents import (
     kg_completeness_judge,
     contradiction_spotting_agent,
 )
+from schemas import (
+    KnowledgeGraph,
+    EntityExtractionResult,
+    RelationshipExtractionResult,
+    KGCompletenessResult,
+)
 
 MAX_STRAY_NODE_ITERATIONS = 5
 MAX_COMPLETENESS_ITERATIONS = 3
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Console helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
 def _banner(text: str) -> None:
-    width = 70
-    print("\n" + "═" * width)
+    print("\n" + "═" * 70)
     print(f"  {text}")
-    print("═" * width)
+    print("═" * 70)
 
 
 def _section(text: str) -> None:
     print(f"\n── {text} {'─' * max(0, 65 - len(text))}")
 
 
-def _select_agents_from_feedback(judge_result: dict) -> dict[str, bool]:
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent selection helper
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _select_agents_from_feedback(judge: KGCompletenessResult) -> dict[str, bool]:
     """
-    Inspect the completeness judge's output and decide which agents need to
-    be re-run.  Returns a dict of booleans keyed by agent name.
+    Inspect the completeness judge output and return which agents need to run.
 
-    Logic
-    ─────
-    • missing_entities whose entity_type is in {people, organisations}
-      → run PeopleOrgsAgent
-    • missing_entities whose entity_type is "assets"
-      → run AssetsAgent
-    • missing_entities whose entity_type is "transactions"
-      → run TransactionsAgent
-    • any missing_relationships present
-      → run RelationshipAgent
-    • hallucinated_entities are handled by direct deletion (no agent needed)
-    • hallucinated_relationships are handled by direct deletion (no agent needed)
+    Mapping
+    ───────
+    missing_entities  (people | organisations) → PeopleOrgsAgent
+    missing_entities  (assets)                 → AssetsAgent
+    missing_entities  (transactions)           → TransactionsAgent
+    any missing_relationships                  → RelationshipAgent
+    hallucinated_entities / hallucinated_relationships
+        → handled by direct deletion inside KGConsolidationAgent (no agent needed)
+
+    Fallback: if the judge reports issues but none map to a known agent,
+    we default to RelationshipAgent (safest: fixes missing edges on existing nodes).
     """
-    missing_entities      = judge_result.get("missing_entities", [])
-    missing_relationships = judge_result.get("missing_relationships", [])
-
-    # Collect the entity types that need attention
-    missing_types: set[str] = {e.get("entity_type", "").lower() for e in missing_entities}
-
-    run_people_orgs   = bool(missing_types & {"people", "organisations", "person", "organisation", "organization"})
-    run_assets        = bool(missing_types & {"assets", "asset"})
-    run_transactions  = bool(missing_types & {"transactions", "transaction"})
-    run_relationships = bool(missing_relationships)
+    missing_types = {e.entity_type.lower() for e in judge.missing_entities}
 
     selection = {
-        "people_orgs":   run_people_orgs,
-        "assets":        run_assets,
-        "transactions":  run_transactions,
-        "relationships": run_relationships,
+        "people_orgs":   bool(missing_types & {"people", "organisations", "person", "organisation", "organization"}),
+        "assets":        bool(missing_types & {"assets", "asset"}),
+        "transactions":  bool(missing_types & {"transactions", "transaction"}),
+        "relationships": bool(judge.missing_relationships),
     }
 
-    active = [name for name, flag in selection.items() if flag]
-    if not active:
-        # Judge flagged something but we couldn't map it — run relationships
-        # as a safe fallback (covers missing edges from existing nodes).
-        print("  [Orchestrator] Could not map missing types to specific agents — defaulting to RelationshipAgent.")
+    if not any(selection.values()):
+        print("  [Orchestrator] Could not map missing types to specific agents "
+              "— defaulting to RelationshipAgent.")
         selection["relationships"] = True
 
-    print(f"  [Orchestrator] Agents selected for improvement run: {[k for k, v in selection.items() if v]}")
+    chosen = [k for k, v in selection.items() if v]
+    print(f"  [Orchestrator] Agents selected for improvement run: {chosen}")
     return selection
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main pipeline
+# ─────────────────────────────────────────────────────────────────────────────
 
 def run_pipeline(
     document_text: str,
@@ -105,196 +121,191 @@ def run_pipeline(
 ) -> dict:
     """
     Execute the full KG extraction multi-agent pipeline.
-    Returns the final knowledge graph and the contradiction report.
+    Returns a plain dict (serialisable) with the final KG and reports.
     """
-
     _banner("KNOWLEDGE GRAPH EXTRACTION PIPELINE — START")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # PHASE 1 — Entity Extraction
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Phase 1: Entity Extraction ───────────────────────────────────────────
     _banner("PHASE 1 · Entity Extraction")
 
     _section("Running PeopleOrgsAgent")
-    people_orgs = people_and_orgs_agent(document_text, entity_ontology)
+    people_orgs: EntityExtractionResult = people_and_orgs_agent(document_text, entity_ontology)
 
     _section("Running AssetsAgent")
-    assets = assets_agent(document_text, entity_ontology)
+    assets: EntityExtractionResult = assets_agent(document_text, entity_ontology)
 
     _section("Running TransactionsAgent")
-    transactions = transactions_agent(document_text, entity_ontology)
+    transactions: EntityExtractionResult = transactions_agent(document_text, entity_ontology)
 
-    # First KG consolidation — merge all entity results
-    _section("KGConsolidationAgent — merging entity extractions")
-    initial_entities = {**people_orgs, **assets, **transactions}
-    kg = kg_consolidation_agent(
-        existing_kg={"entities": {}, "relationships": []},
-        new_data={"entities": initial_entities, "relationships": []},
+    _section("KGConsolidationAgent — merging initial entity extractions")
+    # Combine all three extraction results into one EntityExtractionResult
+    combined_entities = EntityExtractionResult(
+        people=people_orgs.people,
+        organisations=people_orgs.organisations,
+        assets=assets.assets,
+        transactions=transactions.transactions,
+    )
+    kg: KnowledgeGraph = kg_consolidation_agent(
+        existing_kg=KnowledgeGraph(),
+        new_entities=combined_entities,
     )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # PHASE 2 — Relationship Extraction
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Phase 2: Relationship Extraction ─────────────────────────────────────
     _banner("PHASE 2 · Relationship Extraction")
 
     _section("Running RelationshipAgent (page by page)")
-    new_relationships = relationship_extraction_agent(
+    rel_result: RelationshipExtractionResult = relationship_extraction_agent(
         document_pages=document_pages,
         relationship_ontology=relationship_ontology,
-        entities=kg["entities"],
+        kg=kg,
     )
 
     _section("KGConsolidationAgent — merging relationships")
-    kg = kg_consolidation_agent(
-        existing_kg=kg,
-        new_data={"entities": {}, "relationships": new_relationships},
-    )
+    kg = kg_consolidation_agent(existing_kg=kg, new_relationships=rel_result)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Helper: run phases 3 + 4 in a loop (completeness improvements restart them)
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Phases 3 + 4: Stray node + completeness loop ─────────────────────────
     for completeness_iter in range(1, MAX_COMPLETENESS_ITERATIONS + 1):
 
-        # ─────────────────────────────────────────────────────────────────────
-        # PHASE 3 — Stray Node Feedback Loop
-        # ─────────────────────────────────────────────────────────────────────
-        _banner(f"PHASE 3 · Stray Node Detection (completeness iteration {completeness_iter})")
+        # ── Phase 3: Stray Node Feedback Loop ────────────────────────────────
+        _banner(f"PHASE 3 · Stray Node Detection (completeness iter {completeness_iter})")
 
         for stray_iter in range(1, MAX_STRAY_NODE_ITERATIONS + 1):
             _section(f"StrayNodeAgent — iteration {stray_iter}")
-            stray_result = stray_node_agent(kg, relationship_ontology, document_text)
+            stray = stray_node_agent(kg, relationship_ontology, document_text)
 
-            if stray_result["status"] == "ontology_gap":
+            if stray.status == "ontology_gap":
                 _banner("⚠  PIPELINE HALTED — Ontology Gap Detected")
-                print("\nThe stray node agent found entities whose relationships cannot be")
-                print("represented with the current relationship ontology.\n")
-                print("Please review the findings below, refine your relationship ontology,")
-                print("and re-run the pipeline.\n")
+                print("\nEntities found whose relationships cannot be represented")
+                print("with the current ontology. Please refine it and re-run.\n")
                 print("STRAY NODE AGENT OUTPUT:")
-                print(json.dumps(stray_result, indent=2))
+                print(json.dumps(stray.model_dump(exclude_none=True), indent=2))
                 return {
                     "status": "halted_ontology_gap",
-                    "kg": kg,
-                    "stray_node_report": stray_result,
+                    "kg": kg.to_serialisable(),
+                    "stray_node_report": stray.model_dump(exclude_none=True),
                 }
 
-            if stray_result["status"] == "clean":
+            if stray.status == "clean":
                 _section("All nodes connected — proceeding to KG Completeness Judge")
                 break
 
-            if stray_result["status"] == "resolved":
-                _section("KGConsolidationAgent — adding resolved stray-node relationships")
-                kg = kg_consolidation_agent(
-                    existing_kg=kg,
-                    new_data={"entities": {}, "relationships": stray_result["new_relationships"]},
-                )
+            # status == "resolved": add the new relationships
+            _section("KGConsolidationAgent — adding resolved stray-node relationships")
+            stray_rel_result = RelationshipExtractionResult(
+                relationships=stray.new_relationships
+            )
+            kg = kg_consolidation_agent(existing_kg=kg, new_relationships=stray_rel_result)
 
         else:
-            print(f"\n  [Orchestrator] ⚠ Stray node loop hit max iterations ({MAX_STRAY_NODE_ITERATIONS}). Continuing.")
+            print(f"  [Orchestrator] ⚠ Stray node loop hit max ({MAX_STRAY_NODE_ITERATIONS}). Continuing.")
 
-        # ─────────────────────────────────────────────────────────────────────
-        # PHASE 4 — KG Completeness Judge
-        # ─────────────────────────────────────────────────────────────────────
+        # ── Phase 4: KG Completeness Judge ───────────────────────────────────
         _banner(f"PHASE 4 · KG Completeness Judge (iteration {completeness_iter})")
 
         _section("Running KGCompletenessJudge")
-        judge_result = kg_completeness_judge(kg, document_text)
+        judge: KGCompletenessResult = kg_completeness_judge(kg, document_text)
 
-        if judge_result["status"] == "complete":
+        if judge.status == "complete":
             _section("KG deemed complete — proceeding to Contradiction Spotting")
             break
 
-        # ── KG needs improvement: selectively re-run only relevant agents ──
+        # ── Targeted improvement run ──────────────────────────────────────────
         _section("KG needs improvement — selecting agents based on judge feedback")
+        agent_selection = _select_agents_from_feedback(judge)
 
-        # Decide which agents are actually needed
-        agent_selection = _select_agents_from_feedback(judge_result)
+        # Serialise the judge feedback once for agent prompts
+        judge_feedback_dict = judge.model_dump(exclude_none=True)
 
-        # Build a focused prompt that includes the judge's specific feedback
-        improvement_notes = json.dumps({
-            "missing_entities":           judge_result.get("missing_entities", []),
-            "missing_relationships":      judge_result.get("missing_relationships", []),
-            "hallucinated_entities":      judge_result.get("hallucinated_entities", []),
-            "hallucinated_relationships": judge_result.get("hallucinated_relationships", []),
-        }, indent=2)
-
-        improvement_doc = (
-            f"IMPROVEMENT FEEDBACK FROM COMPLETENESS JUDGE:\n{improvement_notes}\n\n"
-            f"ORIGINAL DOCUMENT:\n{document_text}"
-        )
-
-        all_new_entities: dict = {}
-        rels_update: list = []
+        new_entities_parts: list[EntityExtractionResult] = []
+        rel_improvement: RelationshipExtractionResult | None = None
 
         if agent_selection["people_orgs"]:
-            _section("Re-running PeopleOrgsAgent (missing people/org entities flagged)")
-            people_orgs_update = people_and_orgs_agent(improvement_doc, entity_ontology)
-            all_new_entities.update(people_orgs_update)
+            _section("Re-running PeopleOrgsAgent with existing KG + judge feedback")
+            update = people_and_orgs_agent(
+                document_text, entity_ontology,
+                existing_kg=kg, judge_feedback=judge_feedback_dict,
+            )
+            new_entities_parts.append(update)
         else:
             print("  [Orchestrator] Skipping PeopleOrgsAgent — no missing people/org entities.")
 
         if agent_selection["assets"]:
-            _section("Re-running AssetsAgent (missing asset entities flagged)")
-            assets_update = assets_agent(improvement_doc, entity_ontology)
-            all_new_entities.update(assets_update)
+            _section("Re-running AssetsAgent with existing KG + judge feedback")
+            update = assets_agent(
+                document_text, entity_ontology,
+                existing_kg=kg, judge_feedback=judge_feedback_dict,
+            )
+            new_entities_parts.append(update)
         else:
             print("  [Orchestrator] Skipping AssetsAgent — no missing asset entities.")
 
         if agent_selection["transactions"]:
-            _section("Re-running TransactionsAgent (missing transaction entities flagged)")
-            transactions_update = transactions_agent(improvement_doc, entity_ontology)
-            all_new_entities.update(transactions_update)
+            _section("Re-running TransactionsAgent with existing KG + judge feedback")
+            update = transactions_agent(
+                document_text, entity_ontology,
+                existing_kg=kg, judge_feedback=judge_feedback_dict,
+            )
+            new_entities_parts.append(update)
         else:
             print("  [Orchestrator] Skipping TransactionsAgent — no missing transaction entities.")
 
         if agent_selection["relationships"]:
-            _section("Re-running RelationshipAgent (missing relationships flagged)")
-            rels_update = relationship_extraction_agent(
-                document_pages=[improvement_doc],
+            _section("Re-running RelationshipAgent with existing KG + judge feedback")
+            rel_improvement = relationship_extraction_agent(
+                document_pages=document_pages,
                 relationship_ontology=relationship_ontology,
-                entities=kg["entities"],
+                kg=kg,
+                judge_feedback=judge_feedback_dict,
             )
         else:
             print("  [Orchestrator] Skipping RelationshipAgent — no missing relationships.")
 
-        _section("KGConsolidationAgent — merging targeted improvements")
+        # Merge all entity update parts into one
+        merged_entity_update: EntityExtractionResult | None = None
+        if new_entities_parts:
+            merged_entity_update = EntityExtractionResult(
+                people       =[e for p in new_entities_parts for e in p.people],
+                organisations=[e for p in new_entities_parts for e in p.organisations],
+                assets       =[e for p in new_entities_parts for e in p.assets],
+                transactions =[e for p in new_entities_parts for e in p.transactions],
+                entities_to_remove=[
+                    eid for p in new_entities_parts for eid in p.entities_to_remove
+                ],
+            )
+
+        # Also collect hallucinations flagged directly by the judge
+        hallucinated_entity_ids = [e.entity_id for e in judge.hallucinated_entities]
+        hallucinated_rel_ids    = [r.rel_id    for r in judge.hallucinated_relationships]
+
+        _section("KGConsolidationAgent — merging targeted improvements + removals")
         kg = kg_consolidation_agent(
             existing_kg=kg,
-            new_data={"entities": all_new_entities, "relationships": rels_update},
+            new_entities=merged_entity_update,
+            new_relationships=rel_improvement,
+            entities_to_remove=hallucinated_entity_ids,
+            relationships_to_remove=hallucinated_rel_ids,
         )
 
-        # Also remove hallucinations if the judge flagged any
-        hallucinated_entity_ids = {e["entity_id"] for e in judge_result.get("hallucinated_entities", [])}
-        hallucinated_rel_ids    = {r["rel_id"]    for r in judge_result.get("hallucinated_relationships", [])}
-
-        if hallucinated_entity_ids or hallucinated_rel_ids:
-            _section("Removing hallucinated nodes/edges flagged by judge")
-            for etype, elist in kg["entities"].items():
-                kg["entities"][etype] = [e for e in elist if e["id"] not in hallucinated_entity_ids]
-            kg["relationships"] = [r for r in kg["relationships"] if r["id"] not in hallucinated_rel_ids]
-            print(f"  Removed {len(hallucinated_entity_ids)} entity(s) and {len(hallucinated_rel_ids)} relationship(s)")
-
     else:
-        print(f"\n  [Orchestrator] ⚠ Completeness loop hit max iterations ({MAX_COMPLETENESS_ITERATIONS}). Proceeding.")
+        print(f"  [Orchestrator] ⚠ Completeness loop hit max ({MAX_COMPLETENESS_ITERATIONS}). Proceeding.")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # PHASE 5 — Contradiction Spotting
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Phase 5: Contradiction Spotting ──────────────────────────────────────
     _banner("PHASE 5 · Contradiction Spotting")
 
     _section("Running ContradictionAgent")
     contradiction_report = contradiction_spotting_agent(kg, document_text)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # DONE
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── Done ──────────────────────────────────────────────────────────────────
+    total_entities = sum([
+        len(kg.entities.people), len(kg.entities.organisations),
+        len(kg.entities.assets), len(kg.entities.transactions),
+    ])
     _banner("PIPELINE COMPLETE")
-    print(f"\n  Final KG: {sum(len(v) for v in kg['entities'].values())} entities, "
-          f"{len(kg['relationships'])} relationships")
-    print(f"  Contradictions found: {len(contradiction_report['contradictions'])}")
+    print(f"\n  Final KG : {total_entities} entities, {len(kg.relationships)} relationships")
+    print(f"  Contradictions found: {len(contradiction_report.contradictions)}")
 
     return {
         "status": "complete",
-        "kg": kg,
-        "contradiction_report": contradiction_report,
+        "kg": kg.to_serialisable(),
+        "contradiction_report": contradiction_report.model_dump(exclude_none=True),
     }

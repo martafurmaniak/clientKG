@@ -36,7 +36,7 @@ def main() -> None:
     if result["status"] == "halted_ontology_gap":
         print("\n⛔  Pipeline halted due to ontology gap. See output above.")
         gap_path = output_dir / "ontology_gap_report.json"
-        gap_path.write_text(json.dumps(result["stray_node_report"], indent=2))
+        gap_path.write_text(json.dumps(result.get("stray_node_report", {}), indent=2))
         print(f"   Gap report saved → {gap_path}")
         sys.exit(1)
 
