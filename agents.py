@@ -1,9 +1,9 @@
 """
 agents.py — all sub-agent implementations.
 
-Works with both mock (fixed entity types) and real (arbitrary ontology keys)
-inputs, because the KnowledgeGraph now stores entities as dict[str, list[Entity]]
-rather than named fields.
+All agents use the unified flat KG format throughout:
+  entities as a flat list with "type", "label", "attributes" on each entity
+  relationships with "source"/"target"/"type"/"attributes"
 """
 
 from __future__ import annotations
@@ -61,12 +61,11 @@ def _entity_extraction_agent(
     ontology_subset = {k: v for k, v in entity_ontology.items() if k in entity_types}
     is_improvement  = existing_kg is not None and judge_feedback is not None
 
-    # Build an id→type lookup so the agent knows which IDs belong to which type
-    existing_ids_by_type = {
-        etype: [e.to_flat_dict() for e in elist]
-        for etype, elist in existing_kg.entities.items()
-        if etype in entity_types
-    } if existing_kg else {}
+    # Existing entities for these types (flat list for the prompt)
+    existing_for_types = [
+        e.to_dict() for e in existing_kg.entities
+        if e.type in entity_types
+    ] if existing_kg else []
 
     if is_improvement:
         relevant_missing = [
@@ -85,7 +84,7 @@ ENTITY ONTOLOGY:
 {_j(ontology_subset)}
 
 EXISTING ENTITIES IN KG (for these types):
-{_j(existing_ids_by_type)}
+{_j(existing_for_types)}
 
 JUDGE FEEDBACK — missing entities to ADD:
 {_j(relevant_missing)}
@@ -96,19 +95,22 @@ JUDGE FEEDBACK — hallucinated entity IDs to REMOVE:
 SOURCE TEXT (only the relevant page):
 {page_text if page_text is not None else document_text}
 
-Return a JSON object with:
-  - One key per entity type in {entity_types} → list of NEW entity objects to add.
-    Each entity needs an "id" that does not clash with existing IDs above.
-    Include all ontology attributes (use null if unknown).
-  - "entities_to_remove": list of entity ID strings to drop from the KG.
-
-Only include entities that need to change. Do NOT re-list already-correct entities.
-
-Example (for entity types ["Person"]):
+Return a JSON object:
 {{
-  "Person": [{{"id": "person_3", "fullName": "New Person", "dateOfBirth": null}}],
-  "entities_to_remove": ["person_99"]
+  "entities": [
+    {{
+      "id":    "<unique id, must not clash with existing IDs above>",
+      "type":  "<entity type from ontology>",
+      "label": "<short human-readable name>",
+      "attributes": {{
+        "<attr>": "<value or null>"
+      }}
+    }}
+  ],
+  "entities_to_remove": ["<entity_id_to_drop>"]
 }}
+
+Only include NEW entities that need to be added. Do NOT re-list already-correct entities.
 """
     else:
         system_prompt = (
@@ -124,15 +126,19 @@ ENTITY TYPES AND THEIR ATTRIBUTES (ontology):
 DOCUMENT:
 {document_text}
 
-Return a JSON object where each key is an entity type from the ontology,
-and the value is a list of entity objects containing:
-  - "id"  : unique string (e.g. "person_1", "org_1") — use snake_case prefix matching the type
-  - one key per attribute defined in the ontology (use null if unknown)
-
-Example (for entity types ["Person", "Organisation"]):
+Return a JSON object:
 {{
-  "Person": [{{"id": "person_1", "fullName": "John Smith", "dateOfBirth": null}}],
-  "Organisation": [{{"id": "org_1", "name": "Alpine Bank", "type": "bank"}}]
+  "entities": [
+    {{
+      "id":    "<snake_case_type_prefix>_<number>",
+      "type":  "<entity type from ontology>",
+      "label": "<short human-readable name>",
+      "attributes": {{
+        "<attr>": "<value or null>"
+      }}
+    }}
+  ],
+  "entities_to_remove": []
 }}
 """
 
@@ -143,9 +149,8 @@ Example (for entity types ["Person", "Organisation"]):
     raw    = call_llm(system_prompt, user_prompt, label=agent_name)
     result = parse_and_validate(raw, EntityExtractionResult, label=agent_name)
 
-    mode   = "improvement" if is_improvement else "initial"
-    counts = {etype: len(elist) for etype, elist in result.entities.items()}
-    print(f"  [{agent_name}] {mode} → entities={counts}  to_remove={result.entities_to_remove}")
+    mode = "improvement" if is_improvement else "initial"
+    print(f"  [{agent_name}] {mode} → entities={len(result.entities)}  to_remove={len(result.entities_to_remove)}")
     return result
 
 
@@ -266,32 +271,26 @@ def kg_consolidation_agent(
       3. Remove entities by ID (+ cascade to any relationship referencing them).
       4. Remove relationships by ID.
     """
-    # Work on a copy so we never mutate the caller's object
-    entities: dict[str, list] = {
-        etype: list(elist)
-        for etype, elist in existing_kg.entities.items()
-    }
+    # Work on copies so we never mutate the caller's objects
+    entities:      list = list(existing_kg.entities)
     relationships: list = list(existing_kg.relationships)
 
-    # ── 1. Add new entities ──────────────────────────────────────────────────
+    # ── 1. Add new entities (dedup by id) ────────────────────────────────────
     if new_entities:
-        existing_ids = {e.id for elist in entities.values() for e in elist}
-        for etype, elist in new_entities.entities.items():
-            bucket = entities.setdefault(etype, [])
-            for entity in elist:
-                if entity.id not in existing_ids:
-                    bucket.append(entity)
-                    existing_ids.add(entity.id)
-                # silently skip exact-ID duplicates — entity extraction agents
-                # are responsible for assigning unique IDs
+        existing_ids = {e.id for e in entities}
+        for entity in new_entities.entities:
+            if entity.id not in existing_ids:
+                entities.append(entity)
+                existing_ids.add(entity.id)
 
-    # ── 2. Add new relationships ─────────────────────────────────────────────
+    # ── 2. Add new relationships (dedup by source+target+type) ───────────────
     if new_relationships:
-        existing_rel_ids = {r.id for r in relationships}
+        existing_rel_keys = {(r.source, r.target, r.type) for r in relationships}
         for rel in new_relationships.relationships:
-            if rel.id not in existing_rel_ids:
+            key = (rel.source, rel.target, rel.type)
+            if key not in existing_rel_keys:
                 relationships.append(rel)
-                existing_rel_ids.add(rel.id)
+                existing_rel_keys.add(key)
 
     # ── 3 & 4. Collect all IDs to remove ────────────────────────────────────
     remove_entity_ids: set[str] = set(entities_to_remove or [])
@@ -302,23 +301,21 @@ def kg_consolidation_agent(
         remove_rel_ids |= set(new_relationships.relationships_to_remove)
 
     if remove_entity_ids:
-        for etype in entities:
-            entities[etype] = [e for e in entities[etype] if e.id not in remove_entity_ids]
+        entities = [e for e in entities if e.id not in remove_entity_ids]
         # cascade: drop any relationship that touched a removed entity
         relationships = [
             r for r in relationships
-            if r.from_id not in remove_entity_ids and r.to_id not in remove_entity_ids
+            if r.source not in remove_entity_ids and r.target not in remove_entity_ids
         ]
 
     if remove_rel_ids:
-        relationships = [r for r in relationships if r.id not in remove_rel_ids]
+        # relationships no longer have an id field — skip if nothing to remove
+        pass
 
     kg = KnowledgeGraph(entities=entities, relationships=relationships)
 
-    total_e = sum(len(v) for v in kg.entities.values())
-    print(f"  [KGConsolidationAgent] entities={total_e}  relationships={len(kg.relationships)}"
-          + (f"  +removed_entities={len(remove_entity_ids)}" if remove_entity_ids else "")
-          + (f"  +removed_rels={len(remove_rel_ids)}" if remove_rel_ids else ""))
+    print(f"  [KGConsolidationAgent] entities={len(kg.entities)}  relationships={len(kg.relationships)}"
+          + (f"  +removed_entities={len(remove_entity_ids)}" if remove_entity_ids else ""))
     return kg
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -338,7 +335,6 @@ def relationship_extraction_agent(
     is_improvement = judge_feedback is not None
     all_relationships: list = []
     all_to_remove:     list[str] = []
-    rel_counter = len(kg.relationships) + 1
 
     for page_idx, page_text in enumerate(document_pages):
         label = f"RelationshipAgent[page {page_idx + 1}, {'improvement' if is_improvement else 'initial'}]"
@@ -368,11 +364,20 @@ DOCUMENT PAGE {page_idx + 1}:
 Return:
 {{
   "relationships": [
-    {{"id": "rel_{rel_counter}", "type": "<ONTOLOGY_TYPE>", "from_id": "<id>", "to_id": "<id>", "evidence": "..."}}
+    {{
+      "id": "rel_{{rel_counter}}",
+      "type": "<ONTOLOGY_TYPE>",
+      "source": "<entity id>",
+      "target": "<entity id>",
+      "attributes": {{
+        "evidence": "<short text evidence>",
+        "<attr_name>": "<attr_value or null>"
+      }}
+    }}
   ],
-  "relationships_to_remove": ["rel_id_1"]
-}}
+  "relationships_to_remove": []
 
+For each relationship, include ALL attributes defined for that relationship type in the ontology (see the "attributes" field of the ontology entry). Use null for unknown values. Keep "evidence" on every relationship regardless.
 Only include NEW relationships. Do NOT repeat existing correct ones.
 """
         else:
@@ -394,18 +399,25 @@ DOCUMENT PAGE {page_idx + 1}:
 Return:
 {{
   "relationships": [
-    {{"id": "rel_{rel_counter}", "type": "<ONTOLOGY_TYPE>", "from_id": "<id>", "to_id": "<id>", "evidence": "..."}}
+    {{
+      "id": "rel_{{rel_counter}}",
+      "type": "<ONTOLOGY_TYPE>",
+      "source": "<entity id>",
+      "target": "<entity id>",
+      "attributes": {{
+        "evidence": "<short text evidence>",
+        "<attr_name>": "<attr_value or null>"
+      }}
+    }}
   ],
   "relationships_to_remove": []
 }}
+
+For each relationship, include ALL attributes defined for that relationship type in the ontology (see the "attributes" field of the ontology entry). Use null for unknown values. Keep "evidence" on every relationship regardless.
 """
 
         raw         = call_llm(system_prompt, user_prompt, label=label)
         page_result = parse_and_validate(raw, RelationshipExtractionResult, label=label)
-
-        for rel in page_result.relationships:
-            rel.id = f"rel_{rel_counter}"
-            rel_counter += 1
 
         all_relationships.extend(page_result.relationships)
         all_to_remove.extend(page_result.relationships_to_remove)
@@ -429,7 +441,7 @@ def stray_node_agent(
     document_text: str,
 ) -> StrayNodeResult:
     all_ids   = kg.entity_ids()
-    connected = {r.from_id for r in kg.relationships} | {r.to_id for r in kg.relationships}
+    connected = {r.source for r in kg.relationships} | {r.target for r in kg.relationships}
     stray_ids = all_ids - connected
 
     if not stray_ids:
@@ -439,8 +451,8 @@ def stray_node_agent(
     print(f"  [StrayNodeAgent] Found {len(stray_ids)} stray node(s): {stray_ids}")
 
     stray_entities = [
-        e.to_flat_dict()
-        for _, e in kg.all_entities_flat()
+        e.to_dict()
+        for e in kg.entities
         if e.id in stray_ids
     ]
 
@@ -470,7 +482,7 @@ For each stray entity:
 Return:
 {{
   "new_relationships": [
-    {{"id": "rel_stray_1", "type": "<type>", "from_id": "<id>", "to_id": "<id>",
+    {{"source": "<entity id>", "target": "<entity id>", "type": "<type>",
       "evidence": "...", "reasoning": "..."}}
   ],
   "ontology_gaps": [

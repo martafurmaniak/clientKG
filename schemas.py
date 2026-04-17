@@ -1,28 +1,25 @@
 """
 schemas.py — Pydantic v2 models for all agent inputs and outputs.
 
-Design note on entity types
-────────────────────────────
-The mock ontology uses fixed lowercase keys: "people", "organisations",
-"assets", "transactions".
+Single format throughout
+────────────────────────
+All agents, prompts, and the final output share the same KG structure:
 
-The real ontology uses arbitrary PascalCase keys: "Person", "Organisation",
-"Transaction", etc. — whatever the user defines.
+  {
+    "entities": [
+      {"id": "person_1", "type": "Person", "label": "John Smith",
+       "attributes": {"fullName": "John Smith", "age": 45}}
+    ],
+    "relationships": [
+      {"source": "person_1", "target": "asset_1", "type": "OWNS",
+       "attributes": {"since": "2019", "evidence": "..."}}
+    ]
+  }
 
-To handle both without duplicating logic, entities are stored as a
-dict[str, list[Entity]] rather than as named fields.  The Entity model
-itself is a flexible bag-of-attributes (a dict of str→Any) with only
-"id" required.  This lets every agent work the same way regardless of
-ontology source.
-
-The KnowledgeGraph model therefore looks like:
-    {
-      "entities": {
-        "Person":       [{"id": "person_1", "name": "John", ...}],
-        "Organisation": [{"id": "org_1",    "name": "Alpine Bank", ...}]
-      },
-      "relationships": [...]
-    }
+This means:
+  - LLM responses use the same format as the final output file
+  - No translation layer needed — to_serialisable() IS the output format
+  - to_output_format() is kept as an alias for backward compatibility
 """
 
 from __future__ import annotations
@@ -36,45 +33,49 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 # ─────────────────────────────────────────────────────────────────────────────
 
 class Entity(BaseModel):
-    """
-    A flexible entity node.  Only 'id' is required; all other attributes
-    are stored in 'attributes' as a free-form dict so the model works for
-    any ontology without schema changes.
-    """
     id: str
+    type: str = ""
+    label: str = ""
     attributes: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
     def absorb_extra_fields(cls, data: Any) -> Any:
         """
-        LLMs return flat dicts like {"id": "p1", "name": "John", "age": 45}.
-        We hoist 'id' to the top level and pack everything else into
-        'attributes' so the schema stays clean.
+        Accept both the canonical format:
+            {"id": "p1", "type": "Person", "label": "John", "attributes": {...}}
+        and the flat LLM format where attributes are top-level:
+            {"id": "p1", "type": "Person", "label": "John", "fullName": "John", "age": 45}
+        Extra keys beyond id/type/label are packed into attributes.
         """
         if not isinstance(data, dict):
             return data
-        known = {"id", "attributes"}
-        entity_id = data.get("id", "")
+        known = {"id", "type", "label", "attributes"}
         attrs = dict(data.get("attributes", {}))
         for k, v in data.items():
             if k not in known:
                 attrs[k] = v
-        return {"id": entity_id, "attributes": attrs}
+        return {
+            "id":         data.get("id", ""),
+            "type":       data.get("type", ""),
+            "label":      data.get("label", ""),
+            "attributes": attrs,
+        }
 
-    def to_flat_dict(self) -> dict:
-        """Return {"id": ..., <attr_key>: <attr_value>, ...} for LLM prompts."""
-        return {"id": self.id, **self.attributes}
+    def to_dict(self) -> dict:
+        """Canonical serialisable form."""
+        return {
+            "id":         self.id,
+            "type":       self.type,
+            "label":      self.label,
+            "attributes": self.attributes,
+        }
 
 
 class Relationship(BaseModel):
-    id: str
+    source: str
+    target: str
     type: str
-    from_id: str
-    to_id: str
-    evidence: Optional[str] = None
-    reasoning: Optional[str] = None
-    # Ontology-defined attributes for this relationship type (e.g. date, amount, role)
     attributes: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("type", mode="before")
@@ -84,34 +85,39 @@ class Relationship(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def absorb_extra_fields(cls, data: Any) -> Any:
+    def absorb_extra_and_aliases(cls, data: Any) -> Any:
         """
-        LLMs often return ontology attributes as flat keys alongside id/type/etc.
-        Hoist known fields, pack everything else into attributes.
+        Accept:
+          - canonical:  {"source": ..., "target": ..., "type": ..., "attributes": {...}}
+          - legacy:     {"from_id": ..., "to_id": ..., "type": ..., ...}
+          - flat attrs: any extra keys beyond source/target/type packed into attributes
+        Also absorbs evidence/reasoning as attributes if present at top level.
         """
         if not isinstance(data, dict):
             return data
-        known = {"id", "type", "from_id", "to_id", "evidence", "reasoning", "attributes"}
-        attrs = dict(data.get("attributes", {}))
+        # Normalise source/target aliases
+        source = data.get("source") or data.get("from_id") or data.get("from") or ""
+        target = data.get("target") or data.get("to_id") or data.get("to") or ""
+        known  = {"source", "target", "type", "attributes",
+                  "from_id", "to_id", "from", "to", "id"}
+        attrs  = dict(data.get("attributes", {}))
         for k, v in data.items():
             if k not in known:
-                attrs[k] = v
-        return {k: v for k, v in data.items() if k in known} | {"attributes": attrs}
-
-    def to_serialisable(self) -> dict:
-        """Flat dict for json.dumps and LLM prompts — spreads attributes to top level."""
-        base = {
-            "id": self.id,
-            "type": self.type,
-            "from_id": self.from_id,
-            "to_id": self.to_id,
+                attrs[k] = v   # captures evidence, reasoning, and all ontology attrs
+        return {
+            "source":     source,
+            "target":     target,
+            "type":       data.get("type", ""),
+            "attributes": attrs,
         }
-        if self.evidence:
-            base["evidence"] = self.evidence
-        if self.reasoning:
-            base["reasoning"] = self.reasoning
-        base.update(self.attributes)
-        return base
+
+    def to_dict(self) -> dict:
+        return {
+            "source":     self.source,
+            "target":     self.target,
+            "type":       self.type,
+            "attributes": self.attributes,
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,130 +125,56 @@ class Relationship(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class KnowledgeGraph(BaseModel):
-    # entities: {"Person": [Entity, ...], "Organisation": [...], ...}
-    entities: dict[str, list[Entity]] = Field(default_factory=dict)
+    entities:      list[Entity]       = Field(default_factory=list)
     relationships: list[Relationship] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
-    def coerce_entity_lists(cls, data: Any) -> Any:
+    def coerce_inputs(cls, data: Any) -> Any:
         """
-        Ensure every value in 'entities' is a list of Entity-compatible dicts,
-        even if the LLM returned a bare dict or a list of flat attribute dicts.
+        Accept both the canonical flat-list format and the legacy
+        dict-keyed format {"Person": [...], "Organisation": [...]}
+        so the pipeline is backward compatible during the transition.
         """
         if not isinstance(data, dict):
             return data
-        raw_entities = data.get("entities", {})
+
+        raw_entities = data.get("entities", [])
+
+        # Legacy dict-keyed format → flat list
         if isinstance(raw_entities, dict):
-            coerced: dict[str, list] = {}
+            flat: list[dict] = []
             for etype, elist in raw_entities.items():
                 if isinstance(elist, list):
-                    coerced[etype] = elist
-                elif isinstance(elist, dict):
-                    # Single entity returned as a dict — wrap it
-                    coerced[etype] = [elist]
-                else:
-                    coerced[etype] = []
-            data = {**data, "entities": coerced}
+                    for e in elist:
+                        if isinstance(e, dict):
+                            flat.append({**e, "type": e.get("type") or etype})
+                        else:
+                            flat.append(e)
+            data = {**data, "entities": flat}
+
         return data
 
     def entity_ids(self) -> set[str]:
-        ids: set[str] = set()
-        for elist in self.entities.values():
-            for e in elist:
-                ids.add(e.id)
-        return ids
+        return {e.id for e in self.entities}
 
     def all_entities_flat(self) -> list[tuple[str, Entity]]:
-        """Yield (entity_type, entity) pairs across all types."""
-        result = []
-        for etype, elist in self.entities.items():
-            for e in elist:
-                result.append((etype, e))
-        return result
+        """Returns (entity_type, entity) pairs — kept for agent compatibility."""
+        return [(e.type, e) for e in self.entities]
 
     def to_serialisable(self) -> dict:
         """
-        Return a plain dict for json.dumps / LLM prompts.
-        Entities are serialised as flat dicts (id + attributes spread out).
-        Internal format — used by all agents.
+        Canonical serialisable form — this IS the output format.
+        Used for LLM prompts and the final output file.
         """
         return {
-            "entities": {
-                etype: [e.to_flat_dict() for e in elist]
-                for etype, elist in self.entities.items()
-            },
-            "relationships": [
-                r.to_serialisable()
-                for r in self.relationships
-            ],
+            "entities":      [e.to_dict() for e in self.entities],
+            "relationships": [r.to_dict() for r in self.relationships],
         }
 
     def to_output_format(self) -> dict:
-        """
-        Convert to the final output structure:
-
-        {
-          "entities": [
-            {
-              "id": "person_1",
-              "type": "Person",
-              "label": "<best human-readable name>",
-              "attributes": { ...ontology-defined attrs only... }
-            }, ...
-          ],
-          "relationships": [
-            {
-              "source": "entity_id",
-              "target": "entity_id",
-              "type": "RELATIONSHIP_NAME",
-              "attributes": { ...rel attrs + evidence if present... }
-            }, ...
-          ]
-        }
-
-        The internal dict-keyed entity structure and from_id/to_id on
-        relationships are purely internal — this method is the single
-        place that converts to the user-facing format.
-        """
-        out_entities = []
-        for entity_type, elist in self.entities.items():
-            for e in elist:
-                # Pick the best human-readable label from common name fields
-                attrs = e.attributes
-                label = (
-                    attrs.get("fullName")
-                    or attrs.get("name")
-                    or attrs.get("label")
-                    or attrs.get("title")
-                    or attrs.get("companyName")
-                    or attrs.get("accountId")
-                    or e.id
-                )
-                # Exclude internal/meta keys that aren't ontology attributes
-                _internal = {"label", "type", "id"}
-                clean_attrs = {k: v for k, v in attrs.items() if k not in _internal}
-                out_entities.append({
-                    "id":         e.id,
-                    "type":       entity_type,
-                    "label":      str(label),
-                    "attributes": clean_attrs,
-                })
-
-        out_relationships = []
-        for r in self.relationships:
-            rel_attrs = dict(r.attributes)
-            # Keep evidence inside attributes so it appears in the output
-            if r.evidence:
-                rel_attrs["evidence"] = r.evidence
-            out_relationships.append({
-                "source":     r.from_id,
-                "target":     r.to_id,
-                "type":       r.type,
-                "attributes": rel_attrs,
-            })
-
-        return {"entities": out_entities, "relationships": out_relationships}
+        """Alias for to_serialisable() — same format throughout."""
+        return self.to_serialisable()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,33 +182,58 @@ class KnowledgeGraph(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class EntityExtractionResult(BaseModel):
-    """
-    Output of any entity extraction agent (initial or improvement run).
-    'entities' mirrors the KG format: dict keyed by entity type.
-    """
-    entities: dict[str, list[Entity]] = Field(default_factory=dict)
+    entities: list[Entity] = Field(default_factory=list)
     entities_to_remove: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
     def normalise(cls, data: Any) -> Any:
         """
-        Accept either:
-          {"entities": {"Person": [...]}, "entities_to_remove": [...]}
-          {"Person": [...], "Organisation": [...]}   ← bare entity map
+        Accept three formats the LLM might return:
+
+        1. Canonical:
+           {"entities": [...], "entities_to_remove": [...]}
+
+        2. Flat list (bare):
+           [{"id": ..., "type": ..., "label": ..., ...}, ...]
+
+        3. Legacy dict-keyed (old prompt format):
+           {"Person": [...], "Organisation": [...], "entities_to_remove": [...]}
         """
+        if isinstance(data, list):
+            return {"entities": data, "entities_to_remove": []}
+
         if not isinstance(data, dict):
             return data
 
-        known_top = {"entities", "entities_to_remove"}
-        # If there's no "entities" key, assume the whole dict IS the entity map
-        if "entities" not in data:
-            entity_map = {k: v for k, v in data.items() if k not in {"entities_to_remove"}}
-            return {
-                "entities": entity_map,
-                "entities_to_remove": data.get("entities_to_remove", []),
-            }
-        return data
+        if "entities" in data:
+            # Already canonical — but entities might be dict-keyed inside
+            raw = data["entities"]
+            if isinstance(raw, dict):
+                flat = []
+                for etype, elist in raw.items():
+                    if isinstance(elist, list):
+                        for e in elist:
+                            if isinstance(e, dict):
+                                flat.append({**e, "type": e.get("type") or etype})
+                return {"entities": flat,
+                        "entities_to_remove": data.get("entities_to_remove", [])}
+            return data
+
+        # Legacy dict-keyed — every key that isn't entities_to_remove is a type bucket
+        non_type_keys = {"entities_to_remove"}
+        flat = []
+        for k, v in data.items():
+            if k in non_type_keys:
+                continue
+            if isinstance(v, list):
+                for e in v:
+                    if isinstance(e, dict):
+                        flat.append({**e, "type": e.get("type") or k})
+        return {
+            "entities":           flat,
+            "entities_to_remove": data.get("entities_to_remove", []),
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -293,37 +250,6 @@ class RelationshipExtractionResult(BaseModel):
         if isinstance(data, list):
             return {"relationships": data, "relationships_to_remove": []}
         return data
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# KG Consolidation agent output  (same shape as KnowledgeGraph)
-# ─────────────────────────────────────────────────────────────────────────────
-
-class KGConsolidationResult(BaseModel):
-    entities: dict[str, list[Entity]] = Field(default_factory=dict)
-    relationships: list[Relationship] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def coerce_entity_lists(cls, data: Any) -> Any:
-        # Reuse same logic as KnowledgeGraph
-        if not isinstance(data, dict):
-            return data
-        raw_entities = data.get("entities", {})
-        if isinstance(raw_entities, dict):
-            coerced: dict[str, list] = {}
-            for etype, elist in raw_entities.items():
-                if isinstance(elist, list):
-                    coerced[etype] = elist
-                elif isinstance(elist, dict):
-                    coerced[etype] = [elist]
-                else:
-                    coerced[etype] = []
-            data = {**data, "entities": coerced}
-        return data
-
-    def to_knowledge_graph(self) -> KnowledgeGraph:
-        return KnowledgeGraph(entities=self.entities, relationships=self.relationships)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -361,7 +287,7 @@ class MissingEntity(BaseModel):
     name: str
     reasoning: str
     evidence: Optional[str] = None
-    page_number: Optional[int] = None   # 0-based page index where the entity appears
+    page_number: Optional[int] = None
 
 
 class MissingRelationship(BaseModel):
@@ -370,7 +296,7 @@ class MissingRelationship(BaseModel):
     to: str
     reasoning: str
     evidence: Optional[str] = None
-    page_number: Optional[int] = None   # 0-based page index where the relationship appears
+    page_number: Optional[int] = None
 
     model_config = {"populate_by_name": True}
 
@@ -402,13 +328,8 @@ class KGCompletenessResult(BaseModel):
 
     @model_validator(mode="after")
     def derive_status(self) -> "KGCompletenessResult":
-        has_issues = any([
-            self.missing_entities,
-            self.missing_relationships,
-            self.hallucinated_entities,
-            self.hallucinated_relationships,
-        ])
-        if has_issues:
+        if any([self.missing_entities, self.missing_relationships,
+                self.hallucinated_entities, self.hallucinated_relationships]):
             self.status = "needs_improvement"
         return self
 

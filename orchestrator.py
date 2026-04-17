@@ -159,14 +159,10 @@ def run_pipeline(
     transactions: EntityExtractionResult = transactions_agent(document_text, entity_ontology)
 
     _section("KGConsolidationAgent — merging initial entity extractions")
-    # Combine all three extraction results into one EntityExtractionResult.
-    # .entities is dict[str, list[Entity]] — merge by accumulating per-type lists.
-    _combined_map: dict = {}
-    for _r in (people_orgs, assets, transactions):
-        for _etype, _elist in _r.entities.items():
-            if _elist:
-                _combined_map.setdefault(_etype, []).extend(_elist)
-    combined_entities = EntityExtractionResult(entities=_combined_map)
+    # Combine all three extraction results into one EntityExtractionResult (flat list).
+    combined_entities = EntityExtractionResult(
+        entities=[e for r in (people_orgs, assets, transactions) for e in r.entities]
+    )
     kg: KnowledgeGraph = kg_consolidation_agent(
         existing_kg=KnowledgeGraph(),
         new_entities=combined_entities,
@@ -316,16 +312,9 @@ def run_pipeline(
         # ── Merge all per-page results ────────────────────────────────────────
         merged_entity_update: EntityExtractionResult | None = None
         if all_entity_parts:
-            _merged_map: dict = {}
-            for _p in all_entity_parts:
-                for _etype, _elist in _p.entities.items():
-                    if _elist:
-                        _merged_map.setdefault(_etype, []).extend(_elist)
             merged_entity_update = EntityExtractionResult(
-                entities=_merged_map,
-                entities_to_remove=[
-                    eid for p in all_entity_parts for eid in p.entities_to_remove
-                ],
+                entities=[e for p in all_entity_parts for e in p.entities],
+                entities_to_remove=[eid for p in all_entity_parts for eid in p.entities_to_remove],
             )
 
         merged_rel_update: RelationshipExtractionResult | None = None
@@ -358,7 +347,7 @@ def run_pipeline(
     contradiction_report = contradiction_spotting_agent(kg, document_text)
 
     # ── Done ──────────────────────────────────────────────────────────────────
-    total_entities = sum(len(v) for v in kg.entities.values())
+    total_entities = len(kg.entities)
     _banner("PIPELINE COMPLETE")
     print(f"\n  Final KG : {total_entities} entities, {len(kg.relationships)} relationships")
     print(f"  Contradictions found: {len(contradiction_report.contradictions)}")
