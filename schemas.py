@@ -1,98 +1,70 @@
 """
-schemas.py — Pydantic v2 models for every agent input and output.
+schemas.py — Pydantic v2 models for all agent inputs and outputs.
 
-All agent functions accept and return these models (or plain dicts that are
-validated into them).  This gives us:
-  • runtime validation of LLM outputs
-  • clear contracts between agents
-  • automatic coercion of minor type mismatches (e.g. int age as string)
+Design note on entity types
+────────────────────────────
+The mock ontology uses fixed lowercase keys: "people", "organisations",
+"assets", "transactions".
+
+The real ontology uses arbitrary PascalCase keys: "Person", "Organisation",
+"Transaction", etc. — whatever the user defines.
+
+To handle both without duplicating logic, entities are stored as a
+dict[str, list[Entity]] rather than as named fields.  The Entity model
+itself is a flexible bag-of-attributes (a dict of str→Any) with only
+"id" required.  This lets every agent work the same way regardless of
+ontology source.
+
+The KnowledgeGraph model therefore looks like:
+    {
+      "entities": {
+        "Person":       [{"id": "person_1", "name": "John", ...}],
+        "Organisation": [{"id": "org_1",    "name": "Alpine Bank", ...}]
+      },
+      "relationships": [...]
+    }
 """
 
 from __future__ import annotations
+
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared entity types
+# Core entity / relationship primitives
 # ─────────────────────────────────────────────────────────────────────────────
 
-class Person(BaseModel):
+class Entity(BaseModel):
+    """
+    A flexible entity node.  Only 'id' is required; all other attributes
+    are stored in 'attributes' as a free-form dict so the model works for
+    any ontology without schema changes.
+    """
     id: str
-    name: str
-    age: Optional[int] = None
-    role: Optional[str] = None
-    relationship_to_client: Optional[str] = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("age", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def coerce_age(cls, v: Any) -> Optional[int]:
-        if v is None or v == "" or v == "null":
-            return None
-        try:
-            return int(v)
-        except (ValueError, TypeError):
-            return None
+    def absorb_extra_fields(cls, data: Any) -> Any:
+        """
+        LLMs return flat dicts like {"id": "p1", "name": "John", "age": 45}.
+        We hoist 'id' to the top level and pack everything else into
+        'attributes' so the schema stays clean.
+        """
+        if not isinstance(data, dict):
+            return data
+        known = {"id", "attributes"}
+        entity_id = data.get("id", "")
+        attrs = dict(data.get("attributes", {}))
+        for k, v in data.items():
+            if k not in known:
+                attrs[k] = v
+        return {"id": entity_id, "attributes": attrs}
 
-
-class Organisation(BaseModel):
-    id: str
-    name: str
-    type: Optional[str] = None
-    founded_year: Optional[int] = None
-    industry: Optional[str] = None
-
-    @field_validator("founded_year", mode="before")
-    @classmethod
-    def coerce_year(cls, v: Any) -> Optional[int]:
-        if v is None or v == "" or v == "null":
-            return None
-        try:
-            return int(v)
-        except (ValueError, TypeError):
-            return None
-
-
-class Asset(BaseModel):
-    id: str
-    asset_id: Optional[str] = None
-    asset_type: Optional[str] = None
-    value_chf: Optional[float] = None
-    owner: Optional[str] = None
-
-    @field_validator("value_chf", mode="before")
-    @classmethod
-    def coerce_value(cls, v: Any) -> Optional[float]:
-        if v is None or v == "" or v == "null":
-            return None
-        if isinstance(v, str):
-            v = v.replace(",", "").replace("CHF", "").strip()
-        try:
-            return float(v)
-        except (ValueError, TypeError):
-            return None
-
-
-class Transaction(BaseModel):
-    id: str
-    transaction_id: Optional[str] = None
-    date: Optional[str] = None
-    amount_chf: Optional[float] = None
-    from_account: Optional[str] = None
-    to_party: Optional[str] = None
-    description: Optional[str] = None
-
-    @field_validator("amount_chf", mode="before")
-    @classmethod
-    def coerce_amount(cls, v: Any) -> Optional[float]:
-        if v is None or v == "" or v == "null":
-            return None
-        if isinstance(v, str):
-            v = v.replace(",", "").replace("CHF", "").strip()
-        try:
-            return float(v)
-        except (ValueError, TypeError):
-            return None
+    def to_flat_dict(self) -> dict:
+        """Return {"id": ..., <attr_key>: <attr_value>, ...} for LLM prompts."""
+        return {"id": self.id, **self.attributes}
 
 
 class Relationship(BaseModel):
@@ -113,47 +85,64 @@ class Relationship(BaseModel):
 # KG container
 # ─────────────────────────────────────────────────────────────────────────────
 
-class Entities(BaseModel):
-    people: list[Person] = Field(default_factory=list)
-    organisations: list[Organisation] = Field(default_factory=list)
-    assets: list[Asset] = Field(default_factory=list)
-    transactions: list[Transaction] = Field(default_factory=list)
+class KnowledgeGraph(BaseModel):
+    # entities: {"Person": [Entity, ...], "Organisation": [...], ...}
+    entities: dict[str, list[Entity]] = Field(default_factory=dict)
+    relationships: list[Relationship] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
-    def normalise_keys(cls, data: Any) -> Any:
-        """Accept common LLM variations like 'organization', 'asset', etc."""
+    def coerce_entity_lists(cls, data: Any) -> Any:
+        """
+        Ensure every value in 'entities' is a list of Entity-compatible dicts,
+        even if the LLM returned a bare dict or a list of flat attribute dicts.
+        """
         if not isinstance(data, dict):
             return data
-        aliases = {
-            "person": "people",
-            "organization": "organisations",
-            "organization": "organisations",
-            "asset": "assets",
-            "transaction": "transactions",
-        }
-        return {aliases.get(k, k): v for k, v in data.items()}
-
-
-class KnowledgeGraph(BaseModel):
-    entities: Entities = Field(default_factory=Entities)
-    relationships: list[Relationship] = Field(default_factory=list)
+        raw_entities = data.get("entities", {})
+        if isinstance(raw_entities, dict):
+            coerced: dict[str, list] = {}
+            for etype, elist in raw_entities.items():
+                if isinstance(elist, list):
+                    coerced[etype] = elist
+                elif isinstance(elist, dict):
+                    # Single entity returned as a dict — wrap it
+                    coerced[etype] = [elist]
+                else:
+                    coerced[etype] = []
+            data = {**data, "entities": coerced}
+        return data
 
     def entity_ids(self) -> set[str]:
         ids: set[str] = set()
-        for lst in [
-            self.entities.people,
-            self.entities.organisations,
-            self.entities.assets,
-            self.entities.transactions,
-        ]:
-            for e in lst:
+        for elist in self.entities.values():
+            for e in elist:
                 ids.add(e.id)
         return ids
 
+    def all_entities_flat(self) -> list[tuple[str, Entity]]:
+        """Yield (entity_type, entity) pairs across all types."""
+        result = []
+        for etype, elist in self.entities.items():
+            for e in elist:
+                result.append((etype, e))
+        return result
+
     def to_serialisable(self) -> dict:
-        """Return a plain dict safe for json.dumps and LLM prompts."""
-        return self.model_dump(exclude_none=True)
+        """
+        Return a plain dict for json.dumps / LLM prompts.
+        Entities are serialised as flat dicts (id + attributes spread out).
+        """
+        return {
+            "entities": {
+                etype: [e.to_flat_dict() for e in elist]
+                for etype, elist in self.entities.items()
+            },
+            "relationships": [
+                r.model_dump(exclude_none=True)
+                for r in self.relationships
+            ],
+        }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,27 +150,33 @@ class KnowledgeGraph(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class EntityExtractionResult(BaseModel):
-    """Output of any entity extraction agent (initial or improvement run)."""
-    people: list[Person] = Field(default_factory=list)
-    organisations: list[Organisation] = Field(default_factory=list)
-    assets: list[Asset] = Field(default_factory=list)
-    transactions: list[Transaction] = Field(default_factory=list)
-
-    # IDs of entities the agent recommends removing (improvement runs only)
+    """
+    Output of any entity extraction agent (initial or improvement run).
+    'entities' mirrors the KG format: dict keyed by entity type.
+    """
+    entities: dict[str, list[Entity]] = Field(default_factory=dict)
     entities_to_remove: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
-    def normalise_keys(cls, data: Any) -> Any:
+    def normalise(cls, data: Any) -> Any:
+        """
+        Accept either:
+          {"entities": {"Person": [...]}, "entities_to_remove": [...]}
+          {"Person": [...], "Organisation": [...]}   ← bare entity map
+        """
         if not isinstance(data, dict):
             return data
-        aliases = {
-            "person": "people",
-            "organization": "organisations",
-            "asset": "assets",
-            "transaction": "transactions",
-        }
-        return {aliases.get(k, k): v for k, v in data.items()}
+
+        known_top = {"entities", "entities_to_remove"}
+        # If there's no "entities" key, assume the whole dict IS the entity map
+        if "entities" not in data:
+            entity_map = {k: v for k, v in data.items() if k not in {"entities_to_remove"}}
+            return {
+                "entities": entity_map,
+                "entities_to_remove": data.get("entities_to_remove", []),
+            }
+        return data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -189,26 +184,43 @@ class EntityExtractionResult(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RelationshipExtractionResult(BaseModel):
-    """Output of the relationship extraction agent."""
     relationships: list[Relationship] = Field(default_factory=list)
-    relationships_to_remove: list[str] = Field(default_factory=list)  # rel IDs to drop
+    relationships_to_remove: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
     def accept_bare_list(cls, data: Any) -> Any:
-        """LLM sometimes returns a bare list instead of a wrapped object."""
         if isinstance(data, list):
             return {"relationships": data, "relationships_to_remove": []}
         return data
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KG Consolidation agent output
+# KG Consolidation agent output  (same shape as KnowledgeGraph)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class KGConsolidationResult(BaseModel):
-    entities: Entities = Field(default_factory=Entities)
+    entities: dict[str, list[Entity]] = Field(default_factory=dict)
     relationships: list[Relationship] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_entity_lists(cls, data: Any) -> Any:
+        # Reuse same logic as KnowledgeGraph
+        if not isinstance(data, dict):
+            return data
+        raw_entities = data.get("entities", {})
+        if isinstance(raw_entities, dict):
+            coerced: dict[str, list] = {}
+            for etype, elist in raw_entities.items():
+                if isinstance(elist, list):
+                    coerced[etype] = elist
+                elif isinstance(elist, dict):
+                    coerced[etype] = [elist]
+                else:
+                    coerced[etype] = []
+            data = {**data, "entities": coerced}
+        return data
 
     def to_knowledge_graph(self) -> KnowledgeGraph:
         return KnowledgeGraph(entities=self.entities, relationships=self.relationships)
@@ -249,11 +261,6 @@ class MissingEntity(BaseModel):
     name: str
     reasoning: str
     evidence: Optional[str] = None
-
-    @field_validator("entity_type", mode="before")
-    @classmethod
-    def lower_type(cls, v: Any) -> str:
-        return str(v).lower().strip()
 
 
 class MissingRelationship(BaseModel):

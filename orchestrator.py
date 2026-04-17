@@ -74,34 +74,48 @@ def _section(text: str) -> None:
 # Agent selection helper
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _select_agents_from_feedback(judge: KGCompletenessResult) -> dict[str, bool]:
+def _select_agents_from_feedback(
+    judge: KGCompletenessResult,
+    entity_ontology: dict,
+) -> dict[str, bool]:
     """
     Inspect the completeness judge output and return which agents need to run.
 
+    Works with both fixed mock keys ("people", "assets") and arbitrary real
+    ontology keys ("Person", "FinancialAccount") by delegating the same
+    keyword-matching logic that the agent dispatchers use.
+
     Mapping
     ───────
-    missing_entities  (people | organisations) → PeopleOrgsAgent
-    missing_entities  (assets)                 → AssetsAgent
-    missing_entities  (transactions)           → TransactionsAgent
-    any missing_relationships                  → RelationshipAgent
-    hallucinated_entities / hallucinated_relationships
-        → handled by direct deletion inside KGConsolidationAgent (no agent needed)
+    missing entity types matching person/org keywords  → PeopleOrgsAgent
+    missing entity types matching asset keywords        → AssetsAgent
+    missing entity types matching transaction keywords  → TransactionsAgent
+    any missing_relationships                           → RelationshipAgent
+    hallucinated items → direct deletion, no agent needed
 
-    Fallback: if the judge reports issues but none map to a known agent,
-    we default to RelationshipAgent (safest: fixes missing edges on existing nodes).
+    Fallback: unrecognised missing type → RelationshipAgent.
     """
-    missing_types = {e.entity_type.lower() for e in judge.missing_entities}
+    missing_types_raw = {e.entity_type for e in judge.missing_entities}
+    missing_lower     = {t.lower() for t in missing_types_raw}
+
+    # Keyword sets mirror the dispatchers in agents.py
+    PEOPLE_ORG_KW  = {"person", "people", "org", "organisation", "organization", "company", "compan", "bank"}
+    ASSET_KW       = {"asset", "account", "holding"}
+    TRANSACTION_KW = {"transaction", "transfer", "payment"}
+
+    def _matches(kw_set: set[str]) -> bool:
+        return any(any(kw in t for kw in kw_set) for t in missing_lower)
 
     selection = {
-        "people_orgs":   bool(missing_types & {"people", "organisations", "person", "organisation", "organization"}),
-        "assets":        bool(missing_types & {"assets", "asset"}),
-        "transactions":  bool(missing_types & {"transactions", "transaction"}),
+        "people_orgs":   _matches(PEOPLE_ORG_KW),
+        "assets":        _matches(ASSET_KW),
+        "transactions":  _matches(TRANSACTION_KW),
         "relationships": bool(judge.missing_relationships),
     }
 
     if not any(selection.values()):
         print("  [Orchestrator] Could not map missing types to specific agents "
-              "— defaulting to RelationshipAgent.")
+              f"(missing types: {missing_types_raw}) — defaulting to RelationshipAgent.")
         selection["relationships"] = True
 
     chosen = [k for k, v in selection.items() if v]
@@ -211,7 +225,7 @@ def run_pipeline(
 
         # ── Targeted improvement run ──────────────────────────────────────────
         _section("KG needs improvement — selecting agents based on judge feedback")
-        agent_selection = _select_agents_from_feedback(judge)
+        agent_selection = _select_agents_from_feedback(judge, entity_ontology)
 
         # Serialise the judge feedback once for agent prompts
         judge_feedback_dict = judge.model_dump(exclude_none=True)
