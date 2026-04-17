@@ -87,24 +87,21 @@ def _print_page_preview(pages: list[str]) -> None:
 
 
 def _save_outputs(result: dict, output_dir: Path) -> None:
-    if result["status"] == "halted_ontology_gap":
-        print("\n⛔  Pipeline halted — ontology gap detected.")
-        gap_path = output_dir / "ontology_gap_report.json"
-        gap_path.write_text(json.dumps(result.get("stray_node_report", {}), indent=2))
-        print(f"   Gap report → {gap_path}")
-        sys.exit(1)
-
     kg_path            = output_dir / "final_kg.json"
     contradiction_path = output_dir / "contradiction_report.json"
+    gap_path           = output_dir / "ontology_gap_report.json"
 
     kg_path.write_text(json.dumps(result["kg"], indent=2))
     contradiction_path.write_text(json.dumps(result["contradiction_report"], indent=2))
+    gap_path.write_text(json.dumps(result.get("ontology_gap_report", {}), indent=2))
 
     print(f"\n✅  Outputs saved:")
     print(f"   Knowledge graph      → {kg_path}")
     print(f"   Contradiction report → {contradiction_path}")
+    print(f"   Ontology gap report  → {gap_path}")
 
     _print_contradiction_summary(result["contradiction_report"])
+    _print_gap_summary(result.get("ontology_gap_report", {}))
 
 
 def _print_contradiction_summary(cr: dict) -> None:
@@ -120,6 +117,22 @@ def _print_contradiction_summary(cr: dict) -> None:
             print(f"     Evidence : {c.get('evidence', '')}")
     else:
         print("\nNo contradictions found.")
+
+
+def _print_gap_summary(gap_report: dict) -> None:
+    gaps = gap_report.get("gaps", [])
+    if not gaps:
+        return
+    print("\n" + "═" * 70)
+    print("  ONTOLOGY GAP REPORT")
+    print("═" * 70)
+    print(f"\n{gap_report.get('recommendation', '')}")
+    print(f"\nGaps found ({len(gaps)}):")
+    for i, g in enumerate(gaps, 1):
+        print(f"  {i}. Entity: {g.get('entity_id', 'unknown')}")
+        print(f"     Reasoning : {g.get('reasoning', '')}")
+        if g.get("evidence"):
+            print(f"     Evidence  : {g['evidence']}")
 
 
 if __name__ == "__main__":

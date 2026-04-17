@@ -365,7 +365,6 @@ Return:
 {{
   "relationships": [
     {{
-      "id": "rel_{{rel_counter}}",
       "type": "<ONTOLOGY_TYPE>",
       "source": "<entity id>",
       "target": "<entity id>",
@@ -377,7 +376,10 @@ Return:
   ],
   "relationships_to_remove": []
 
-For each relationship, include ALL attributes defined for that relationship type in the ontology (see the "attributes" field of the ontology entry). Use null for unknown values. Keep "evidence" on every relationship regardless.
+For each relationship:
+- "evidence" is REQUIRED — always include a verbatim or paraphrased quote from the document that supports this relationship. Never leave it empty or null.
+- Include ALL attributes defined for that relationship type in the ontology (see the "attributes" field). Use null for unknown values.
+- Do NOT include a "reasoning" field.
 Only include NEW relationships. Do NOT repeat existing correct ones.
 """
         else:
@@ -400,7 +402,6 @@ Return:
 {{
   "relationships": [
     {{
-      "id": "rel_{{rel_counter}}",
       "type": "<ONTOLOGY_TYPE>",
       "source": "<entity id>",
       "target": "<entity id>",
@@ -413,7 +414,10 @@ Return:
   "relationships_to_remove": []
 }}
 
-For each relationship, include ALL attributes defined for that relationship type in the ontology (see the "attributes" field of the ontology entry). Use null for unknown values. Keep "evidence" on every relationship regardless.
+For each relationship:
+- "evidence" is REQUIRED — always include a verbatim or paraphrased quote from the document that supports this relationship. Never leave it empty or null.
+- Include ALL attributes defined for that relationship type in the ontology (see the "attributes" field). Use null for unknown values.
+- Do NOT include a "reasoning" field.
 """
 
         raw         = call_llm(system_prompt, user_prompt, label=label)
@@ -483,7 +487,7 @@ Return:
 {{
   "new_relationships": [
     {{"source": "<entity id>", "target": "<entity id>", "type": "<type>",
-      "evidence": "...", "reasoning": "..."}}
+      "attributes": {{"evidence": "<verbatim or paraphrased quote from document>"}}}}
   ],
   "ontology_gaps": [
     {{"entity_id": "<id>", "reasoning": "...", "evidence": "..."}}

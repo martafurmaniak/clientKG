@@ -182,6 +182,9 @@ def run_pipeline(
     kg = kg_consolidation_agent(existing_kg=kg, new_relationships=rel_result)
 
     # ── Phases 3 + 4: Stray node + completeness loop ─────────────────────────
+    # Collect ontology gaps across all iterations — pipeline continues regardless
+    all_ontology_gaps: list[dict] = []
+
     for completeness_iter in range(1, MAX_COMPLETENESS_ITERATIONS + 1):
 
         # ── Phase 3: Stray Node Feedback Loop ────────────────────────────────
@@ -192,16 +195,20 @@ def run_pipeline(
             stray = stray_node_agent(kg, relationship_ontology, document_text)
 
             if stray.status == "ontology_gap":
-                _banner("⚠  PIPELINE HALTED — Ontology Gap Detected")
-                print("\nEntities found whose relationships cannot be represented")
-                print("with the current ontology. Please refine it and re-run.\n")
-                print("STRAY NODE AGENT OUTPUT:")
-                print(json.dumps(stray.model_dump(exclude_none=True), indent=2))
-                return {
-                    "status": "halted_ontology_gap",
-                    "kg": kg.to_output_format(),
-                    "stray_node_report": stray.model_dump(exclude_none=True),
-                }
+                # Collect gaps and continue — no longer halts execution
+                gaps = [g.model_dump(exclude_none=True) for g in stray.ontology_gaps]
+                all_ontology_gaps.extend(gaps)
+                print(f"  [Orchestrator] Ontology gap(s) recorded ({len(gaps)} new, "
+                      f"{len(all_ontology_gaps)} total) — continuing pipeline.")
+                # Also merge any relationships resolved alongside the gaps
+                if stray.new_relationships:
+                    kg = kg_consolidation_agent(
+                        existing_kg=kg,
+                        new_relationships=RelationshipExtractionResult(
+                            relationships=stray.new_relationships
+                        ),
+                    )
+                break  # gaps cannot be resolved without ontology change — move on
 
             if stray.status == "clean":
                 _section("All nodes connected — proceeding to KG Completeness Judge")
@@ -352,8 +359,21 @@ def run_pipeline(
     print(f"\n  Final KG : {total_entities} entities, {len(kg.relationships)} relationships")
     print(f"  Contradictions found: {len(contradiction_report.contradictions)}")
 
+    if all_ontology_gaps:
+        print(f"  Ontology gaps recorded: {len(all_ontology_gaps)} "
+              f"(see ontology_gap_report.json)")
+
     return {
         "status": "complete",
         "kg": kg.to_output_format(),
         "contradiction_report": contradiction_report.model_dump(exclude_none=True),
+        "ontology_gap_report": {
+            "total_gaps": len(all_ontology_gaps),
+            "gaps": all_ontology_gaps,
+            "recommendation": (
+                "The following entities could not be connected using the current "
+                "relationship ontology. Consider adding new relationship types to "
+                "represent these connections."
+            ) if all_ontology_gaps else None,
+        },
     }

@@ -91,19 +91,24 @@ class Relationship(BaseModel):
           - canonical:  {"source": ..., "target": ..., "type": ..., "attributes": {...}}
           - legacy:     {"from_id": ..., "to_id": ..., "type": ..., ...}
           - flat attrs: any extra keys beyond source/target/type packed into attributes
-        Also absorbs evidence/reasoning as attributes if present at top level.
+        Absorbs evidence as an attribute; drops reasoning entirely.
         """
         if not isinstance(data, dict):
             return data
         # Normalise source/target aliases
         source = data.get("source") or data.get("from_id") or data.get("from") or ""
         target = data.get("target") or data.get("to_id") or data.get("to") or ""
-        known  = {"source", "target", "type", "attributes",
-                  "from_id", "to_id", "from", "to", "id"}
+        drop   = {"source", "target", "type", "attributes",
+                  "from_id", "to_id", "from", "to", "id",
+                  "reasoning"}   # reasoning dropped
         attrs  = dict(data.get("attributes", {}))
+        attrs.pop("reasoning", None)   # drop if it snuck into attributes too
         for k, v in data.items():
-            if k not in known:
-                attrs[k] = v   # captures evidence, reasoning, and all ontology attrs
+            if k not in drop:
+                attrs[k] = v   # captures evidence and all ontology attrs
+        # Enforce evidence is always present
+        if not attrs.get("evidence"):
+            attrs["evidence"] = ""
         return {
             "source":     source,
             "target":     target,
@@ -112,11 +117,16 @@ class Relationship(BaseModel):
         }
 
     def to_dict(self) -> dict:
+        # Drop reasoning from output — not needed in the final KG
+        # Ensure evidence is always present (fallback to empty string if LLM omitted it)
+        attrs = {k: v for k, v in self.attributes.items() if k != "reasoning"}
+        if "evidence" not in attrs:
+            attrs["evidence"] = ""
         return {
             "source":     self.source,
             "target":     self.target,
             "type":       self.type,
-            "attributes": self.attributes,
+            "attributes": attrs,
         }
 
 
