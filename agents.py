@@ -43,6 +43,8 @@ def _entity_extraction_agent(
     entity_ontology: dict,
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
+    custom_instructions: str | None = None,
+    page_text: str | None = None,
 ) -> EntityExtractionResult:
     """
     Generic entity extractor.
@@ -50,6 +52,11 @@ def _entity_extraction_agent(
     Initial run  — extracts all entities of `entity_types` from `document_text`.
     Improvement  — receives existing KG + judge feedback; returns only the
                    delta (new entities to add, IDs to remove).
+
+    custom_instructions — optional free-text appended to the user prompt to
+                          give agent-specific guidance (e.g. disambiguation
+                          rules, edge cases, domain context). Applied in both
+                          initial and improvement runs.
     """
     ontology_subset = {k: v for k, v in entity_ontology.items() if k in entity_types}
     is_improvement  = existing_kg is not None and judge_feedback is not None
@@ -86,8 +93,8 @@ JUDGE FEEDBACK — missing entities to ADD:
 JUDGE FEEDBACK — hallucinated entity IDs to REMOVE:
 {_j(relevant_hallucinated)}
 
-SOURCE DOCUMENT:
-{document_text}
+SOURCE TEXT (only the relevant page):
+{page_text if page_text is not None else document_text}
 
 Return a JSON object with:
   - One key per entity type in {entity_types} → list of NEW entity objects to add.
@@ -129,6 +136,10 @@ Example (for entity types ["Person", "Organisation"]):
 }}
 """
 
+    # Append custom instructions to the user prompt if provided
+    if custom_instructions and custom_instructions.strip():
+        user_prompt += f"\n\nADDITIONAL INSTRUCTIONS:\n{custom_instructions.strip()}"
+
     raw    = call_llm(system_prompt, user_prompt, label=agent_name)
     result = parse_and_validate(raw, EntityExtractionResult, label=agent_name)
 
@@ -139,11 +150,6 @@ Example (for entity types ["Person", "Organisation"]):
 
 
 # ── Type-classification keyword sets ─────────────────────────────────────────
-# Substrings matched case-insensitively against ontology key names.
-# Covers the mock ontology (people, organisations, assets, transactions)
-# AND the real ontology (Person, Organization, Client Profile,
-# Asset, Account, Transaction, CorporateEvent).
-
 _PEOPLE_ORG_KW: frozenset = frozenset({
     "people", "person",
     "organization", "organisation",
@@ -189,8 +195,10 @@ def people_and_orgs_agent(
     if not types:
         types = [k for k in entity_ontology
                  if not _matches_any(k, _ASSET_KW) and not _matches_any(k, _TRANSACTION_KW)]
-    return _entity_extraction_agent("PeopleOrgsAgent", types, document_text, entity_ontology,
-                                     existing_kg, judge_feedback)
+    return _entity_extraction_agent(
+        "PeopleOrgsAgent", types, document_text, entity_ontology,
+        existing_kg, judge_feedback,
+    )
 
 
 def assets_agent(
@@ -200,8 +208,10 @@ def assets_agent(
     judge_feedback: dict | None = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _ASSET_KW)
-    return _entity_extraction_agent("AssetsAgent", types, document_text, entity_ontology,
-                                     existing_kg, judge_feedback)
+    return _entity_extraction_agent(
+        "AssetsAgent", types, document_text, entity_ontology,
+        existing_kg, judge_feedback,
+    )
 
 
 def transactions_agent(
@@ -211,9 +221,10 @@ def transactions_agent(
     judge_feedback: dict | None = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _TRANSACTION_KW)
-    return _entity_extraction_agent("TransactionsAgent", types, document_text, entity_ontology,
-                                     existing_kg, judge_feedback)
-
+    return _entity_extraction_agent(
+        "TransactionsAgent", types, document_text, entity_ontology,
+        existing_kg, judge_feedback,
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. KG Consolidation agent
@@ -387,15 +398,26 @@ Return:
     )
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Stray node detection agent
 # ─────────────────────────────────────────────────────────────────────────────
+
+STRAY_NODE_BATCH_SIZE = 10  # max entities per LLM call
+
 
 def stray_node_agent(
     kg: KnowledgeGraph,
     relationship_ontology: dict,
     document_text: str,
 ) -> StrayNodeResult:
+    """
+    Detects entities with no relationships and attempts to find edges for them.
+
+    Stray nodes are processed in batches of STRAY_NODE_BATCH_SIZE to avoid
+    hitting the token limit when there are many unconnected entities.
+    Results from all batches are merged before returning.
+    """
     all_ids   = kg.entity_ids()
     connected = {r.from_id for r in kg.relationships} | {r.to_id for r in kg.relationships}
     stray_ids = all_ids - connected
@@ -412,15 +434,31 @@ def stray_node_agent(
         if e.id in stray_ids
     ]
 
+    # Split into batches
+    batches = [
+        stray_entities[i:i + STRAY_NODE_BATCH_SIZE]
+        for i in range(0, len(stray_entities), STRAY_NODE_BATCH_SIZE)
+    ]
+    n_batches = len(batches)
+    print(f"  [StrayNodeAgent] Processing {n_batches} batch(es) of up to {STRAY_NODE_BATCH_SIZE} nodes each.")
+
     system_prompt = (
         "You are a knowledge-graph quality agent. "
         "Find relationships for stray nodes (entities with no edges). "
         "Return ONLY a valid JSON object — no markdown, no prose."
     )
-    user_prompt = f"""These entities currently have NO relationships in the KG.
 
-STRAY ENTITIES:
-{_j(stray_entities)}
+    all_new_relationships = []
+    all_ontology_gaps     = []
+    rel_stray_counter     = 1
+
+    for batch_idx, batch in enumerate(batches, 1):
+        label = f"StrayNodeAgent[batch {batch_idx}/{n_batches}]"
+
+        user_prompt = f"""These entities currently have NO relationships in the KG.
+
+STRAY ENTITIES (batch {batch_idx} of {n_batches}):
+{_j(batch)}
 
 FULL KNOWLEDGE GRAPH:
 {_kg_json(kg)}
@@ -432,13 +470,13 @@ DOCUMENT:
 {document_text}
 
 For each stray entity:
-1. Try to find at least one relationship using only ontology types.
+1. Try to find at least one relationship to another entity in the KG using only ontology types.
 2. If no ontology type fits, add to ontology_gaps.
 
 Return:
 {{
   "new_relationships": [
-    {{"id": "rel_stray_1", "type": "<type>", "from_id": "<id>", "to_id": "<id>",
+    {{"id": "rel_stray_{rel_stray_counter}", "type": "<type>", "from_id": "<id>", "to_id": "<id>",
       "evidence": "...", "reasoning": "..."}}
   ],
   "ontology_gaps": [
@@ -447,17 +485,34 @@ Return:
 }}
 """
 
-    raw    = call_llm(system_prompt, user_prompt, label="StrayNodeAgent")
-    result = parse_and_validate(raw, StrayNodeResult, label="StrayNodeAgent")
+        raw          = call_llm(system_prompt, user_prompt, label=label)
+        batch_result = parse_and_validate(raw, StrayNodeResult, label=label)
 
-    if result.status == "ontology_gap":
-        print(f"  [StrayNodeAgent] ⚠ Ontology gap for {len(result.ontology_gaps)} node(s).")
-    elif result.status == "resolved":
-        print(f"  [StrayNodeAgent] Resolved {len(result.new_relationships)} relationship(s).")
+        # Re-index relationship IDs across batches to avoid collisions
+        for rel in batch_result.new_relationships:
+            rel.id = f"rel_stray_{rel_stray_counter}"
+            rel_stray_counter += 1
+
+        all_new_relationships.extend(batch_result.new_relationships)
+        all_ontology_gaps.extend(batch_result.ontology_gaps)
+
+        print(f"  [StrayNodeAgent] batch {batch_idx}: "
+              f"resolved={len(batch_result.new_relationships)}  gaps={len(batch_result.ontology_gaps)}")
+
+    # Merge all batch results into one StrayNodeResult
+    # (status is derived automatically by the model_validator)
+    merged = StrayNodeResult(
+        new_relationships=all_new_relationships,
+        ontology_gaps=all_ontology_gaps,
+    )
+
+    if merged.status == "ontology_gap":
+        print(f"  [StrayNodeAgent] ⚠ Ontology gap for {len(merged.ontology_gaps)} node(s).")
+    elif merged.status == "resolved":
+        print(f"  [StrayNodeAgent] Resolved {len(merged.new_relationships)} relationship(s) across {n_batches} batch(es).")
     else:
         print("  [StrayNodeAgent] All stray nodes resolved.")
-    return result
-
+    return merged
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. KG Completeness judge
@@ -465,8 +520,20 @@ Return:
 
 def kg_completeness_judge(
     kg: KnowledgeGraph,
-    document_text: str,
+    document_pages: list[str],
 ) -> KGCompletenessResult:
+    """
+    Checks the KG for missing/hallucinated items.
+    Receives the full list of pages so it can tag each missing item with the
+    0-based page_number where the evidence appears.  The orchestrator uses
+    these page numbers to call improvement agents with only the relevant page
+    rather than the full document.
+    """
+    # Build a numbered page block so the model can reference page indices
+    numbered_pages = "\n\n".join(
+        f"--- PAGE {i} ---\n{page}" for i, page in enumerate(document_pages)
+    )
+
     system_prompt = (
         "You are a knowledge-graph completeness judge. "
         "Compare the KG against the source document. "
@@ -477,18 +544,19 @@ def kg_completeness_judge(
 KNOWLEDGE GRAPH:
 {_kg_json(kg)}
 
-SOURCE DOCUMENT:
-{document_text}
+SOURCE DOCUMENT (pages are numbered starting from 0):
+{numbered_pages}
 
 Return:
 {{
   "status": "complete" or "needs_improvement",
   "missing_entities": [
-    {{"entity_type": "<exact ontology type key>", "name": "...", "reasoning": "...", "evidence": "..."}}
+    {{"entity_type": "<exact ontology type key>", "name": "...",
+      "reasoning": "...", "evidence": "...", "page_number": <0-based int>}}
   ],
   "missing_relationships": [
     {{"type": "<ONTOLOGY_TYPE>", "from": "<name or id>", "to": "<name or id>",
-      "reasoning": "...", "evidence": "..."}}
+      "reasoning": "...", "evidence": "...", "page_number": <0-based int>}}
   ],
   "hallucinated_entities": [
     {{"entity_id": "...", "reasoning": "...", "evidence": "..."}}
@@ -499,7 +567,10 @@ Return:
   "reasoning": "Overall assessment."
 }}
 
-Set status "complete" ONLY when there are zero missing items AND zero hallucinations.
+Rules:
+- page_number must be the 0-based index of the page where the evidence is found.
+- If evidence spans multiple pages use the page where it first appears.
+- Set status "complete" ONLY when there are zero missing items AND zero hallucinations.
 """
 
     raw    = call_llm(system_prompt, user_prompt, label="KGCompletenessJudge")

@@ -127,6 +127,13 @@ def _select_agents_from_feedback(
 # Main pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _agents_needed_for_entities(missing_entities: list, entity_ontology: dict) -> dict:
+    """Build a stub KGCompletenessResult and delegate to _select_agents_from_feedback."""
+    from schemas import KGCompletenessResult as _KGC
+    stub = _KGC(missing_entities=missing_entities)
+    return _select_agents_from_feedback(stub, entity_ontology)
+
+
 def run_pipeline(
     document_text: str,
     document_pages: list[str],
@@ -218,79 +225,117 @@ def run_pipeline(
         _banner(f"PHASE 4 · KG Completeness Judge (iteration {completeness_iter})")
 
         _section("Running KGCompletenessJudge")
-        judge: KGCompletenessResult = kg_completeness_judge(kg, document_text)
+        judge: KGCompletenessResult = kg_completeness_judge(kg, document_pages)
 
         if judge.status == "complete":
             _section("KG deemed complete — proceeding to Contradiction Spotting")
             break
 
-        # ── Targeted improvement run ──────────────────────────────────────────
-        _section("KG needs improvement — selecting agents based on judge feedback")
-        agent_selection = _select_agents_from_feedback(judge, entity_ontology)
+        # ── Targeted improvement run — grouped by page ───────────────────────
+        _section("KG needs improvement — grouping feedback by page and selecting agents")
 
-        # Serialise the judge feedback once for agent prompts
         judge_feedback_dict = judge.model_dump(exclude_none=True)
 
-        new_entities_parts: list[EntityExtractionResult] = []
-        rel_improvement: RelationshipExtractionResult | None = None
+        # Group missing entities and relationships by page_number.
+        # Items with no page_number (None) go into a fallback group keyed by -1
+        # which will use the full document as context.
+        entity_pages:  dict[int, list] = {}
+        rel_pages:     dict[int, list] = {}
 
-        if agent_selection["people_orgs"]:
-            _section("Re-running PeopleOrgsAgent with existing KG + judge feedback")
-            update = people_and_orgs_agent(
-                document_text, entity_ontology,
-                existing_kg=kg, judge_feedback=judge_feedback_dict,
-            )
-            new_entities_parts.append(update)
-        else:
-            print("  [Orchestrator] Skipping PeopleOrgsAgent — no missing people/org entities.")
+        for me in judge.missing_entities:
+            pg = me.page_number if me.page_number is not None else -1
+            entity_pages.setdefault(pg, []).append(me.model_dump(exclude_none=True))
 
-        if agent_selection["assets"]:
-            _section("Re-running AssetsAgent with existing KG + judge feedback")
-            update = assets_agent(
-                document_text, entity_ontology,
-                existing_kg=kg, judge_feedback=judge_feedback_dict,
-            )
-            new_entities_parts.append(update)
-        else:
-            print("  [Orchestrator] Skipping AssetsAgent — no missing asset entities.")
+        for mr in judge.missing_relationships:
+            pg = mr.page_number if mr.page_number is not None else -1
+            rel_pages.setdefault(pg, []).append(mr.model_dump(by_alias=True, exclude_none=True))
 
-        if agent_selection["transactions"]:
-            _section("Re-running TransactionsAgent with existing KG + judge feedback")
-            update = transactions_agent(
-                document_text, entity_ontology,
-                existing_kg=kg, judge_feedback=judge_feedback_dict,
-            )
-            new_entities_parts.append(update)
-        else:
-            print("  [Orchestrator] Skipping TransactionsAgent — no missing transaction entities.")
+        all_entity_parts: list[EntityExtractionResult] = []
+        all_rel_parts:    list[RelationshipExtractionResult] = []
 
-        if agent_selection["relationships"]:
-            _section("Re-running RelationshipAgent with existing KG + judge feedback")
-            rel_improvement = relationship_extraction_agent(
-                document_pages=document_pages,
+        # ── Per-page entity extraction ────────────────────────────────────────
+        for page_idx, missing_on_page in entity_pages.items():
+            # Resolve the page text: -1 means no page info → use full document
+            if page_idx == -1:
+                page_text = document_text
+                page_label = "full doc (no page tag)"
+            else:
+                page_text  = document_pages[page_idx] if page_idx < len(document_pages) else document_text
+                page_label = f"page {page_idx}"
+
+            # Build a minimal feedback dict containing only this page's items
+            page_feedback = {**judge_feedback_dict, "missing_entities": missing_on_page}
+
+            # Determine which entity agents are needed for this page's items
+            page_missing_entities = [
+                me for me in judge.missing_entities
+                if (me.page_number if me.page_number is not None else -1) == page_idx
+            ]
+            page_agent_sel = _agents_needed_for_entities(page_missing_entities, entity_ontology)
+
+            if page_agent_sel["people_orgs"]:
+                _section(f"PeopleOrgsAgent — {page_label}")
+                all_entity_parts.append(people_and_orgs_agent(
+                    page_text, entity_ontology,
+                    existing_kg=kg, judge_feedback=page_feedback,
+                ))
+
+            if page_agent_sel["assets"]:
+                _section(f"AssetsAgent — {page_label}")
+                all_entity_parts.append(assets_agent(
+                    page_text, entity_ontology,
+                    existing_kg=kg, judge_feedback=page_feedback,
+                ))
+
+            if page_agent_sel["transactions"]:
+                _section(f"TransactionsAgent — {page_label}")
+                all_entity_parts.append(transactions_agent(
+                    page_text, entity_ontology,
+                    existing_kg=kg, judge_feedback=page_feedback,
+                ))
+
+        # ── Per-page relationship extraction ─────────────────────────────────
+        for page_idx, missing_on_page in rel_pages.items():
+            if page_idx == -1:
+                pages_for_call = document_pages   # fallback: all pages
+                page_label = "full doc (no page tag)"
+            else:
+                pages_for_call = [document_pages[page_idx]] if page_idx < len(document_pages) else document_pages
+                page_label = f"page {page_idx}"
+
+            page_feedback = {**judge_feedback_dict, "missing_relationships": missing_on_page}
+
+            _section(f"RelationshipAgent — {page_label}")
+            all_rel_parts.append(relationship_extraction_agent(
+                document_pages=pages_for_call,
                 relationship_ontology=relationship_ontology,
                 kg=kg,
-                judge_feedback=judge_feedback_dict,
-            )
-        else:
-            print("  [Orchestrator] Skipping RelationshipAgent — no missing relationships.")
+                judge_feedback=page_feedback,
+            ))
 
-        # Merge all entity update parts into one
+        # ── Merge all per-page results ────────────────────────────────────────
         merged_entity_update: EntityExtractionResult | None = None
-        if new_entities_parts:
+        if all_entity_parts:
             _merged_map: dict = {}
-            for _p in new_entities_parts:
+            for _p in all_entity_parts:
                 for _etype, _elist in _p.entities.items():
                     if _elist:
                         _merged_map.setdefault(_etype, []).extend(_elist)
             merged_entity_update = EntityExtractionResult(
                 entities=_merged_map,
                 entities_to_remove=[
-                    eid for p in new_entities_parts for eid in p.entities_to_remove
+                    eid for p in all_entity_parts for eid in p.entities_to_remove
                 ],
             )
 
-        # Also collect hallucinations flagged directly by the judge
+        merged_rel_update: RelationshipExtractionResult | None = None
+        if all_rel_parts:
+            merged_rel_update = RelationshipExtractionResult(
+                relationships=[r for p in all_rel_parts for r in p.relationships],
+                relationships_to_remove=[rid for p in all_rel_parts for rid in p.relationships_to_remove],
+            )
+
+        # ── Hallucinations are removed directly, no agent needed ─────────────
         hallucinated_entity_ids = [e.entity_id for e in judge.hallucinated_entities]
         hallucinated_rel_ids    = [r.rel_id    for r in judge.hallucinated_relationships]
 
@@ -298,7 +343,7 @@ def run_pipeline(
         kg = kg_consolidation_agent(
             existing_kg=kg,
             new_entities=merged_entity_update,
-            new_relationships=rel_improvement,
+            new_relationships=merged_rel_update,
             entities_to_remove=hallucinated_entity_ids,
             relationships_to_remove=hallucinated_rel_ids,
         )
