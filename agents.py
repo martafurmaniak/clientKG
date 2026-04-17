@@ -14,7 +14,6 @@ from schemas import (
     KnowledgeGraph,
     EntityExtractionResult,
     RelationshipExtractionResult,
-    KGConsolidationResult,
     StrayNodeResult,
     KGCompletenessResult,
     ContradictionResult,
@@ -142,7 +141,7 @@ Example (for entity types ["Person", "Organisation"]):
 # ── Type-classification keyword sets ─────────────────────────────────────────
 # Substrings matched case-insensitively against ontology key names.
 # Covers the mock ontology (people, organisations, assets, transactions)
-# AND the real ontology (Person, Organization, ClientProfile,
+# AND the real ontology (Person, Organization, Client Profile,
 # Asset, Account, Transaction, CorporateEvent).
 
 _PEOPLE_ORG_KW: frozenset = frozenset({
@@ -228,22 +227,42 @@ def kg_consolidation_agent(
     relationships_to_remove: list[str] | None = None,
 ) -> KnowledgeGraph:
     """
-    Merges additions into existing_kg and removes flagged IDs.
-    LLM handles de-duplication; removals are applied deterministically in Python.
+    Pure deterministic merge — no LLM call.
+
+    Operations performed in order:
+      1. Append new entities under their type key (keyed by id, no duplicates).
+      2. Append new relationships (keyed by id, no duplicates).
+      3. Remove entities by ID (+ cascade to any relationship referencing them).
+      4. Remove relationships by ID.
     """
-    new_data: dict = {"entities": {}, "relationships": []}
+    # Work on a copy so we never mutate the caller's object
+    entities: dict[str, list] = {
+        etype: list(elist)
+        for etype, elist in existing_kg.entities.items()
+    }
+    relationships: list = list(existing_kg.relationships)
 
+    # ── 1. Add new entities ──────────────────────────────────────────────────
     if new_entities:
+        existing_ids = {e.id for elist in entities.values() for e in elist}
         for etype, elist in new_entities.entities.items():
-            if elist:
-                new_data["entities"][etype] = [e.to_flat_dict() for e in elist]
+            bucket = entities.setdefault(etype, [])
+            for entity in elist:
+                if entity.id not in existing_ids:
+                    bucket.append(entity)
+                    existing_ids.add(entity.id)
+                # silently skip exact-ID duplicates — entity extraction agents
+                # are responsible for assigning unique IDs
 
+    # ── 2. Add new relationships ─────────────────────────────────────────────
     if new_relationships:
-        new_data["relationships"] = [
-            r.model_dump(exclude_none=True) for r in new_relationships.relationships
-        ]
+        existing_rel_ids = {r.id for r in relationships}
+        for rel in new_relationships.relationships:
+            if rel.id not in existing_rel_ids:
+                relationships.append(rel)
+                existing_rel_ids.add(rel.id)
 
-    # Aggregate removal sets
+    # ── 3 & 4. Collect all IDs to remove ────────────────────────────────────
     remove_entity_ids: set[str] = set(entities_to_remove or [])
     remove_rel_ids:    set[str] = set(relationships_to_remove or [])
     if new_entities:
@@ -251,51 +270,25 @@ def kg_consolidation_agent(
     if new_relationships:
         remove_rel_ids |= set(new_relationships.relationships_to_remove)
 
-    system_prompt = (
-        "You are a knowledge-graph consolidation engine. "
-        "Merge the two JSON knowledge graphs into one coherent graph. "
-        "De-duplicate entities (same real-world thing → keep one entry, merge attributes). "
-        "Preserve all unique relationships. "
-        "Return ONLY a valid JSON object with keys 'entities' and 'relationships'. "
-        "No markdown, no explanations."
-    )
-    user_prompt = f"""EXISTING KNOWLEDGE GRAPH:
-{_kg_json(existing_kg)}
-
-NEW DATA TO MERGE:
-{_j(new_data)}
-
-Return the merged knowledge graph.
-'entities' must be a dict keyed by entity type — use the SAME type keys already
-present in the existing graph.
-'relationships' must be a list of objects with: id, type, from_id, to_id, evidence (optional).
-"""
-
-    raw    = call_llm(system_prompt, user_prompt, label="KGConsolidationAgent")
-    result = parse_and_validate(raw, KGConsolidationResult, label="KGConsolidationAgent")
-    kg     = result.to_knowledge_graph()
-
-    # Deterministic removals — never trust the LLM to delete
     if remove_entity_ids:
-        for etype in kg.entities:
-            kg.entities[etype] = [
-                e for e in kg.entities[etype] if e.id not in remove_entity_ids
-            ]
-        # Cascade: drop relationships that referenced a removed entity
-        kg.relationships = [
-            r for r in kg.relationships
+        for etype in entities:
+            entities[etype] = [e for e in entities[etype] if e.id not in remove_entity_ids]
+        # cascade: drop any relationship that touched a removed entity
+        relationships = [
+            r for r in relationships
             if r.from_id not in remove_entity_ids and r.to_id not in remove_entity_ids
         ]
 
     if remove_rel_ids:
-        kg.relationships = [r for r in kg.relationships if r.id not in remove_rel_ids]
+        relationships = [r for r in relationships if r.id not in remove_rel_ids]
+
+    kg = KnowledgeGraph(entities=entities, relationships=relationships)
 
     total_e = sum(len(v) for v in kg.entities.values())
     print(f"  [KGConsolidationAgent] entities={total_e}  relationships={len(kg.relationships)}"
-          + (f"  removed_entities={len(remove_entity_ids)}" if remove_entity_ids else "")
-          + (f"  removed_rels={len(remove_rel_ids)}" if remove_rel_ids else ""))
+          + (f"  +removed_entities={len(remove_entity_ids)}" if remove_entity_ids else "")
+          + (f"  +removed_rels={len(remove_rel_ids)}" if remove_rel_ids else ""))
     return kg
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Relationship extraction agent  (initial + improvement runs)
