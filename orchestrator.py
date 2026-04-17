@@ -365,6 +365,6 @@ def run_pipeline(
 
     return {
         "status": "complete",
-        "kg": kg.to_serialisable(),
+        "kg": kg.to_output_format(),
         "contradiction_report": contradiction_report.model_dump(exclude_none=True),
     }
