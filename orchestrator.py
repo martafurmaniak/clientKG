@@ -203,7 +203,7 @@ def run_pipeline(
                 print(json.dumps(stray.model_dump(exclude_none=True), indent=2))
                 return {
                     "status": "halted_ontology_gap",
-                    "kg": kg.to_serialisable(),
+                    "kg": kg.to_output_format(),
                     "stray_node_report": stray.model_dump(exclude_none=True),
                 }
 

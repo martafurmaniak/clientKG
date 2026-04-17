@@ -74,11 +74,44 @@ class Relationship(BaseModel):
     to_id: str
     evidence: Optional[str] = None
     reasoning: Optional[str] = None
+    # Ontology-defined attributes for this relationship type (e.g. date, amount, role)
+    attributes: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("type", mode="before")
     @classmethod
     def upper_type(cls, v: Any) -> str:
         return str(v).upper().strip()
+
+    @model_validator(mode="before")
+    @classmethod
+    def absorb_extra_fields(cls, data: Any) -> Any:
+        """
+        LLMs often return ontology attributes as flat keys alongside id/type/etc.
+        Hoist known fields, pack everything else into attributes.
+        """
+        if not isinstance(data, dict):
+            return data
+        known = {"id", "type", "from_id", "to_id", "evidence", "reasoning", "attributes"}
+        attrs = dict(data.get("attributes", {}))
+        for k, v in data.items():
+            if k not in known:
+                attrs[k] = v
+        return {k: v for k, v in data.items() if k in known} | {"attributes": attrs}
+
+    def to_serialisable(self) -> dict:
+        """Flat dict for json.dumps and LLM prompts — spreads attributes to top level."""
+        base = {
+            "id": self.id,
+            "type": self.type,
+            "from_id": self.from_id,
+            "to_id": self.to_id,
+        }
+        if self.evidence:
+            base["evidence"] = self.evidence
+        if self.reasoning:
+            base["reasoning"] = self.reasoning
+        base.update(self.attributes)
+        return base
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -132,6 +165,7 @@ class KnowledgeGraph(BaseModel):
         """
         Return a plain dict for json.dumps / LLM prompts.
         Entities are serialised as flat dicts (id + attributes spread out).
+        Internal format — used by all agents.
         """
         return {
             "entities": {
@@ -139,10 +173,76 @@ class KnowledgeGraph(BaseModel):
                 for etype, elist in self.entities.items()
             },
             "relationships": [
-                r.model_dump(exclude_none=True)
+                r.to_serialisable()
                 for r in self.relationships
             ],
         }
+
+    def to_output_format(self) -> dict:
+        """
+        Convert to the final output structure:
+
+        {
+          "entities": [
+            {
+              "id": "person_1",
+              "type": "Person",
+              "label": "<best human-readable name>",
+              "attributes": { ...ontology-defined attrs only... }
+            }, ...
+          ],
+          "relationships": [
+            {
+              "source": "entity_id",
+              "target": "entity_id",
+              "type": "RELATIONSHIP_NAME",
+              "attributes": { ...rel attrs + evidence if present... }
+            }, ...
+          ]
+        }
+
+        The internal dict-keyed entity structure and from_id/to_id on
+        relationships are purely internal — this method is the single
+        place that converts to the user-facing format.
+        """
+        out_entities = []
+        for entity_type, elist in self.entities.items():
+            for e in elist:
+                # Pick the best human-readable label from common name fields
+                attrs = e.attributes
+                label = (
+                    attrs.get("fullName")
+                    or attrs.get("name")
+                    or attrs.get("label")
+                    or attrs.get("title")
+                    or attrs.get("companyName")
+                    or attrs.get("accountId")
+                    or e.id
+                )
+                # Exclude internal/meta keys that aren't ontology attributes
+                _internal = {"label", "type", "id"}
+                clean_attrs = {k: v for k, v in attrs.items() if k not in _internal}
+                out_entities.append({
+                    "id":         e.id,
+                    "type":       entity_type,
+                    "label":      str(label),
+                    "attributes": clean_attrs,
+                })
+
+        out_relationships = []
+        for r in self.relationships:
+            rel_attrs = dict(r.attributes)
+            # Keep evidence inside attributes so it appears in the output
+            if r.evidence:
+                rel_attrs["evidence"] = r.evidence
+            out_relationships.append({
+                "source":     r.from_id,
+                "target":     r.to_id,
+                "type":       r.type,
+                "attributes": rel_attrs,
+            })
+
+        return {"entities": out_entities, "relationships": out_relationships}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
