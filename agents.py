@@ -185,11 +185,26 @@ def _people_org_types(ontology: dict) -> list:
     return _pick_types(ontology, _PEOPLE_ORG_KW)
 
 
+# ── Per-agent custom instructions ────────────────────────────────────────────
+# Set these strings to add domain-specific guidance to each extraction agent.
+# Applied in both initial and improvement runs. Set to None to disable.
+#
+# Example:
+#   PEOPLE_ORGS_INSTRUCTIONS = """
+#   - Always extract the Client Profile separately from the underlying Person.
+#   - If a person is mentioned only as a counterparty, still extract them.
+#   """
+PEOPLE_ORGS_INSTRUCTIONS: str | None = None
+ASSETS_INSTRUCTIONS:      str | None = None
+TRANSACTIONS_INSTRUCTIONS: str | None = None
+
+
 def people_and_orgs_agent(
     document_text: str,
     entity_ontology: dict,
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
+    custom_instructions: str | None = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _PEOPLE_ORG_KW)
     if not types:
@@ -198,6 +213,7 @@ def people_and_orgs_agent(
     return _entity_extraction_agent(
         "PeopleOrgsAgent", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
+        custom_instructions=custom_instructions or PEOPLE_ORGS_INSTRUCTIONS,
     )
 
 
@@ -206,11 +222,13 @@ def assets_agent(
     entity_ontology: dict,
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
+    custom_instructions: str | None = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _ASSET_KW)
     return _entity_extraction_agent(
         "AssetsAgent", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
+        custom_instructions=custom_instructions or ASSETS_INSTRUCTIONS,
     )
 
 
@@ -219,11 +237,13 @@ def transactions_agent(
     entity_ontology: dict,
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
+    custom_instructions: str | None = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _TRANSACTION_KW)
     return _entity_extraction_agent(
         "TransactionsAgent", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
+        custom_instructions=custom_instructions or TRANSACTIONS_INSTRUCTIONS,
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -403,21 +423,11 @@ Return:
 # 4. Stray node detection agent
 # ─────────────────────────────────────────────────────────────────────────────
 
-STRAY_NODE_BATCH_SIZE = 10  # max entities per LLM call
-
-
 def stray_node_agent(
     kg: KnowledgeGraph,
     relationship_ontology: dict,
     document_text: str,
 ) -> StrayNodeResult:
-    """
-    Detects entities with no relationships and attempts to find edges for them.
-
-    Stray nodes are processed in batches of STRAY_NODE_BATCH_SIZE to avoid
-    hitting the token limit when there are many unconnected entities.
-    Results from all batches are merged before returning.
-    """
     all_ids   = kg.entity_ids()
     connected = {r.from_id for r in kg.relationships} | {r.to_id for r in kg.relationships}
     stray_ids = all_ids - connected
@@ -434,31 +444,15 @@ def stray_node_agent(
         if e.id in stray_ids
     ]
 
-    # Split into batches
-    batches = [
-        stray_entities[i:i + STRAY_NODE_BATCH_SIZE]
-        for i in range(0, len(stray_entities), STRAY_NODE_BATCH_SIZE)
-    ]
-    n_batches = len(batches)
-    print(f"  [StrayNodeAgent] Processing {n_batches} batch(es) of up to {STRAY_NODE_BATCH_SIZE} nodes each.")
-
     system_prompt = (
         "You are a knowledge-graph quality agent. "
         "Find relationships for stray nodes (entities with no edges). "
         "Return ONLY a valid JSON object — no markdown, no prose."
     )
+    user_prompt = f"""These entities currently have NO relationships in the KG.
 
-    all_new_relationships = []
-    all_ontology_gaps     = []
-    rel_stray_counter     = 1
-
-    for batch_idx, batch in enumerate(batches, 1):
-        label = f"StrayNodeAgent[batch {batch_idx}/{n_batches}]"
-
-        user_prompt = f"""These entities currently have NO relationships in the KG.
-
-STRAY ENTITIES (batch {batch_idx} of {n_batches}):
-{_j(batch)}
+STRAY ENTITIES:
+{_j(stray_entities)}
 
 FULL KNOWLEDGE GRAPH:
 {_kg_json(kg)}
@@ -476,7 +470,7 @@ For each stray entity:
 Return:
 {{
   "new_relationships": [
-    {{"id": "rel_stray_{rel_stray_counter}", "type": "<type>", "from_id": "<id>", "to_id": "<id>",
+    {{"id": "rel_stray_1", "type": "<type>", "from_id": "<id>", "to_id": "<id>",
       "evidence": "...", "reasoning": "..."}}
   ],
   "ontology_gaps": [
@@ -485,35 +479,16 @@ Return:
 }}
 """
 
-        raw          = call_llm(system_prompt, user_prompt, label=label)
-        batch_result = parse_and_validate(raw, StrayNodeResult, label=label)
+    raw    = call_llm(system_prompt, user_prompt, label="StrayNodeAgent")
+    result = parse_and_validate(raw, StrayNodeResult, label="StrayNodeAgent")
 
-        # Re-index relationship IDs across batches to avoid collisions
-        for rel in batch_result.new_relationships:
-            rel.id = f"rel_stray_{rel_stray_counter}"
-            rel_stray_counter += 1
-
-        all_new_relationships.extend(batch_result.new_relationships)
-        all_ontology_gaps.extend(batch_result.ontology_gaps)
-
-        print(f"  [StrayNodeAgent] batch {batch_idx}: "
-              f"resolved={len(batch_result.new_relationships)}  gaps={len(batch_result.ontology_gaps)}")
-
-    # Merge all batch results into one StrayNodeResult
-    # (status is derived automatically by the model_validator)
-    merged = StrayNodeResult(
-        new_relationships=all_new_relationships,
-        ontology_gaps=all_ontology_gaps,
-    )
-
-    if merged.status == "ontology_gap":
-        print(f"  [StrayNodeAgent] ⚠ Ontology gap for {len(merged.ontology_gaps)} node(s).")
-    elif merged.status == "resolved":
-        print(f"  [StrayNodeAgent] Resolved {len(merged.new_relationships)} relationship(s) across {n_batches} batch(es).")
+    if result.status == "ontology_gap":
+        print(f"  [StrayNodeAgent] ⚠ Ontology gap for {len(result.ontology_gaps)} node(s).")
+    elif result.status == "resolved":
+        print(f"  [StrayNodeAgent] Resolved {len(result.new_relationships)} relationship(s).")
     else:
         print("  [StrayNodeAgent] All stray nodes resolved.")
-    return merged
-
+    return result
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. KG Completeness judge
 # ─────────────────────────────────────────────────────────────────────────────
