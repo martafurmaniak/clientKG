@@ -139,22 +139,57 @@ Example (for entity types ["Person", "Organisation"]):
     return result
 
 
+# ── Type-classification keyword sets ─────────────────────────────────────────
+# Substrings matched case-insensitively against ontology key names.
+# Covers the mock ontology (people, organisations, assets, transactions)
+# AND the real ontology (Person, Organization, ClientProfile,
+# Asset, Account, Transaction, CorporateEvent).
+
+_PEOPLE_ORG_KW: frozenset = frozenset({
+    "people", "person",
+    "organization", "organisation",
+    "compan", "bank", "fund",
+    "client profile", "client_profile",
+    "profile", "role",
+})
+
+_ASSET_KW: frozenset = frozenset({
+    "asset", "assets",
+    "account",
+    "holding", "portfolio", "security", "instrument",
+})
+
+_TRANSACTION_KW: frozenset = frozenset({
+    "transaction", "transactions",
+    "transfer", "payment",
+    "corporate", "event",
+})
+
+
+def _matches_any(key: str, kw_set: frozenset) -> bool:
+    k = key.lower()
+    return any(kw in k for kw in kw_set)
+
+
+def _pick_types(ontology: dict, kw_set: frozenset) -> list:
+    return [k for k in ontology if _matches_any(k, kw_set)]
+
+
+def _people_org_types(ontology: dict) -> list:
+    """Used by orchestrator agent-selection; mirrors people_and_orgs_agent."""
+    return _pick_types(ontology, _PEOPLE_ORG_KW)
+
+
 def people_and_orgs_agent(
     document_text: str,
     entity_ontology: dict,
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
 ) -> EntityExtractionResult:
-    # Identify all entity types that are "person-like" or "org-like"
-    person_like = [k for k in entity_ontology if "person" in k.lower() or "people" in k.lower()]
-    org_like    = [k for k in entity_ontology if "org" in k.lower() or "compan" in k.lower()
-                   or "bank" in k.lower() or k.lower() in ("organisations", "organizations")]
-    types = list(dict.fromkeys(person_like + org_like))  # deduplicated, order preserved
+    types = _pick_types(entity_ontology, _PEOPLE_ORG_KW)
     if not types:
-        # fallback: anything not assets/transactions
-        asset_txn = {k for k in entity_ontology if "asset" in k.lower() or "transaction" in k.lower()
-                     or "account" in k.lower()}
-        types = [k for k in entity_ontology if k not in asset_txn]
+        types = [k for k in entity_ontology
+                 if not _matches_any(k, _ASSET_KW) and not _matches_any(k, _TRANSACTION_KW)]
     return _entity_extraction_agent("PeopleOrgsAgent", types, document_text, entity_ontology,
                                      existing_kg, judge_feedback)
 
@@ -165,12 +200,7 @@ def assets_agent(
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
 ) -> EntityExtractionResult:
-    types = [k for k in entity_ontology if "asset" in k.lower() or "account" in k.lower()
-             or "holding" in k.lower() or k.lower() == "assets"]
-    if not types:
-        types = [k for k in entity_ontology if k.lower() not in
-                 {t.lower() for t in _people_org_types(entity_ontology)}
-                 and "transaction" not in k.lower()]
+    types = _pick_types(entity_ontology, _ASSET_KW)
     return _entity_extraction_agent("AssetsAgent", types, document_text, entity_ontology,
                                      existing_kg, judge_feedback)
 
@@ -181,20 +211,9 @@ def transactions_agent(
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
 ) -> EntityExtractionResult:
-    types = [k for k in entity_ontology if "transaction" in k.lower()
-             or "transfer" in k.lower() or "payment" in k.lower()
-             or k.lower() == "transactions"]
-    if not types:
-        types = []  # no transaction-like types in this ontology — skip gracefully
+    types = _pick_types(entity_ontology, _TRANSACTION_KW)
     return _entity_extraction_agent("TransactionsAgent", types, document_text, entity_ontology,
                                      existing_kg, judge_feedback)
-
-
-def _people_org_types(ontology: dict) -> list[str]:
-    person_like = [k for k in ontology if "person" in k.lower() or "people" in k.lower()]
-    org_like    = [k for k in ontology if "org" in k.lower() or "compan" in k.lower()
-                   or "bank" in k.lower() or k.lower() in ("organisations", "organizations")]
-    return list(dict.fromkeys(person_like + org_like))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
