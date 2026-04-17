@@ -261,6 +261,7 @@ class MissingEntity(BaseModel):
     name: str
     reasoning: str
     evidence: Optional[str] = None
+    page_number: Optional[int] = None   # 0-based page index where the entity appears
 
 
 class MissingRelationship(BaseModel):
@@ -269,6 +270,7 @@ class MissingRelationship(BaseModel):
     to: str
     reasoning: str
     evidence: Optional[str] = None
+    page_number: Optional[int] = None   # 0-based page index where the relationship appears
 
     model_config = {"populate_by_name": True}
 
