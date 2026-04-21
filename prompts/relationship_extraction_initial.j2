@@ -17,22 +17,27 @@ FULL KG (for context):
 DOCUMENT PAGE {{ page_number }}:
 {{ page_text }}
 
-Return a JSON object. For each relationship the "attributes" object must contain:
-  - "evidence": a verbatim or paraphrased quote from the document (REQUIRED, never null)
-  - every attribute defined for that relationship type in the ontology above (null if not found)
-  - no other keys
+For EACH relationship type, the required output structure is shown below.
+Return only relationship types that are supported by evidence in the document.
 
-{
-  "relationships": [
-    {
-      "type": "<one of the relationship types listed above>",
-      "source": "<entity id>",
-      "target": "<entity id>",
-      "attributes": {
-        "evidence": "<quote or paraphrase from document>"
-      }
+{% for r in relationship_ontology_rich %}
+{{ r.type }}:
+  {
+    "type": "{{ r.type }}",
+    "source": "<id of a {{ r.from | join(' or ') }} entity>",
+    "target": "<id of a {{ r.to | join(' or ') }} entity>",
+    "attributes": {
+      "evidence": "<verbatim or paraphrased quote from document>",
+      {% if r.attributes is mapping %}{% for attr in r.attributes.keys() %}"{{ attr }}": "<value or null>"{% if not loop.last %},
+      {% endif %}{% endfor %}{% endif %}
+
     }
-  ],
+  }
+{% endfor %}
+
+Return:
+{
+  "relationships": [ ... one object per relationship found, using the exact structure above ... ],
   "relationships_to_remove": []
 }
 
