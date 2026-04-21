@@ -112,6 +112,10 @@ class Relationship(BaseModel):
                   "from_id", "to_id", "from", "to", "id",
                   "reasoning"}   # reasoning dropped
         attrs  = dict(data.get("attributes", {}))
+        # Strip null/placeholder keys — LLM sometimes emits "<attr>": null literally
+        _BAD_KEYS = {"null", "<attr>", "<attr_name>", "<attr_name>", ""}
+        attrs = {k: v for k, v in attrs.items()
+                 if k is not None and str(k).strip() not in _BAD_KEYS}
         attrs.pop("reasoning", None)   # drop if it snuck into attributes too
         for k, v in data.items():
             if k not in drop:
