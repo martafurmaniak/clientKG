@@ -217,19 +217,22 @@ def run_refinement_loop(
                 _section(f"PeopleOrgsAgent — {pl}")
                 all_entity_parts.append(
                     people_and_orgs_agent(pt, entity_ontology,
-                                          existing_kg=kg, judge_feedback=page_feedback)
+                                          existing_kg=kg, judge_feedback=page_feedback,
+                                          id_seed_kg=kg)
                 )
             if sel["assets"]:
                 _section(f"AssetsAgent — {pl}")
                 all_entity_parts.append(
                     assets_agent(pt, entity_ontology,
-                                 existing_kg=kg, judge_feedback=page_feedback)
+                                 existing_kg=kg, judge_feedback=page_feedback,
+                                 id_seed_kg=kg)
                 )
             if sel["transactions"]:
                 _section(f"TransactionsAgent — {pl}")
                 all_entity_parts.append(
                     transactions_agent(pt, entity_ontology,
-                                       existing_kg=kg, judge_feedback=page_feedback)
+                                       existing_kg=kg, judge_feedback=page_feedback,
+                                       id_seed_kg=kg)
                 )
 
         # Relationship additions — grouped by page

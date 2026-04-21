@@ -103,11 +103,15 @@ def _extract_page(
     system_prompt = get_system_prompt("corroboration_extraction")
 
     # ── Entity extraction ─────────────────────────────────────────────────────
+    # combined_kg is used solely for ID seeding — it contains all known entities
+    # across both the history KG and this document so far, so new IDs never clash
+    combined_kg = KnowledgeGraph(entities=history_kg.entities + doc_kg_so_far.entities)
+
     ent_user = render_with_ontology(
         "corroboration_extraction.j2",
         entity_ontology=entity_ontology,
         relationship_ontology=relationship_ontology,
-        existing_kg=doc_kg_so_far,
+        existing_kg=combined_kg,   # seeds ID counter from ALL known entities
         page_summary=page_summary,
         document_summary=document_summary,
         known_entities=known_entities,
@@ -118,8 +122,7 @@ def _extract_page(
     ent_result = parse_and_validate(raw_ent, EntityExtractionResult, label=label)
 
     # Fix 7: remove any entity the LLM extracted that already exists in the KG
-    all_known = KnowledgeGraph(entities=history_kg.entities + doc_kg_so_far.entities)
-    ent_result = _deduplicate_against_existing(ent_result, all_known)
+    ent_result = _deduplicate_against_existing(ent_result, combined_kg)
 
     # ── Relationship extraction ───────────────────────────────────────────────
     combined_for_rels = KnowledgeGraph(

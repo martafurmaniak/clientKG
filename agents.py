@@ -51,6 +51,7 @@ def _entity_extraction_agent(
     judge_feedback: dict | None = None,
     custom_instructions: str | None = None,
     page_text: str | None = None,
+    id_seed_kg: KnowledgeGraph | None = None,
 ) -> EntityExtractionResult:
     """
     Generic entity extractor.
@@ -58,6 +59,13 @@ def _entity_extraction_agent(
     Initial run  — extracts all entities of `entity_types` from `document_text`.
     Improvement  — receives existing KG + judge feedback; returns only the
                    delta (new entities to add, IDs to remove).
+
+    id_seed_kg : optional KG used ONLY for computing the next stable ID per
+                 entity type via render_with_ontology. When provided it
+                 overrides existing_kg for ID seeding. Use this when the
+                 corroboration pipeline needs to seed IDs from the combined
+                 history + doc KG while only showing the doc-so-far entities
+                 as "existing" in the improvement prompt.
     """
     ontology_subset = {k: v for k, v in entity_ontology.items() if k in entity_types}
     is_improvement  = existing_kg is not None and judge_feedback is not None
@@ -73,7 +81,7 @@ def _entity_extraction_agent(
             "entity_extraction_improvement.j2",
             entity_ontology=ontology_subset,
             relationship_ontology={},
-            existing_kg=existing_kg,
+            existing_kg=id_seed_kg or existing_kg,
             entity_types=entity_types,
             ontology_subset=ontology_subset,
             existing_for_types=existing_for_types,
@@ -91,7 +99,7 @@ def _entity_extraction_agent(
             "entity_extraction_initial.j2",
             entity_ontology=ontology_subset,
             relationship_ontology={},
-            existing_kg=existing_kg,   # None on first call → starts from prefix+1
+            existing_kg=id_seed_kg or existing_kg,   # use id_seed_kg for ID counter if provided
             ontology_subset=ontology_subset,
             document_text=document_text,
             custom_instructions=custom_instructions,
@@ -147,6 +155,7 @@ def people_and_orgs_agent(
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
     custom_instructions: str | None = None,
+    id_seed_kg: KnowledgeGraph | None = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _PEOPLE_ORG_KW)
     if not types:
@@ -156,6 +165,7 @@ def people_and_orgs_agent(
         "PeopleOrgsAgent", "people_orgs", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
         custom_instructions=custom_instructions or get_instructions("people_orgs"),
+        id_seed_kg=id_seed_kg,
     )
 
 
@@ -165,12 +175,14 @@ def assets_agent(
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
     custom_instructions: str | None = None,
+    id_seed_kg: KnowledgeGraph | None = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _ASSET_KW)
     return _entity_extraction_agent(
         "AssetsAgent", "assets", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
         custom_instructions=custom_instructions or get_instructions("assets"),
+        id_seed_kg=id_seed_kg,
     )
 
 
@@ -180,12 +192,14 @@ def transactions_agent(
     existing_kg: KnowledgeGraph | None = None,
     judge_feedback: dict | None = None,
     custom_instructions: str | None = None,
+    id_seed_kg: KnowledgeGraph | None = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _TRANSACTION_KW)
     return _entity_extraction_agent(
         "TransactionsAgent", "transactions", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
         custom_instructions=custom_instructions or get_instructions("transactions"),
+        id_seed_kg=id_seed_kg,
     )
 
 
@@ -251,13 +265,26 @@ def kg_consolidation_agent(
                 updated_rels.append(r)
         relationships = updated_rels
 
-    # ── 3. Add new entities (dedup by id) ────────────────────────────────────
+    # ── 3. Add new entities — dedup by id, rename on collision ───────────────
     if new_entities:
+        from ontology_utils import get_id_prefix
+        import re as _re
         existing_ids = {e.id for e in entities}
         for entity in new_entities.entities:
-            if entity.id not in existing_ids:
-                entities.append(entity)
-                existing_ids.add(entity.id)
+            eid = entity.id
+            if eid in existing_ids:
+                # ID collision: assign the next available ID for this prefix
+                prefix = get_id_prefix(entity.type)
+                current_max = max(
+                    (int(m.group(1)) for e in entities
+                     if (m := _re.search(r"(\d+)$", e.id)) and e.id.startswith(prefix)),
+                    default=0
+                )
+                new_id = f"{prefix}{current_max + 1}"
+                print(f"  [KGConsolidationAgent] ⚠ ID collision '{eid}' → renamed to '{new_id}'")
+                entity = entity.model_copy(update={"id": new_id})
+            entities.append(entity)
+            existing_ids.add(entity.id)
 
     # ── 4. Add new relationships (dedup by source+target+type) ───────────────
     if new_relationships:
