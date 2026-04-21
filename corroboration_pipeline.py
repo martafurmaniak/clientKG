@@ -32,41 +32,48 @@ from corroboration_loader import CorroborationDoc
 # Fix 7: Python-side entity deduplication
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _deduplicate_against_existing(
+def _resolve_against_existing(
     new_result: EntityExtractionResult,
-    existing_kg: KnowledgeGraph,
+    history_kg: KnowledgeGraph,
+    doc_kg_so_far: KnowledgeGraph,
 ) -> EntityExtractionResult:
     """
-    Remove from new_result any entity that already exists in existing_kg,
-    matching on normalised label (case-insensitive, whitespace-stripped).
+    Resolve extracted entities against the history KG and doc-so-far:
 
-    This is a safety net for the case where the LLM creates a new node for
-    an entity that already exists in the history KG despite the prompt
-    instruction not to. Only label matching is used — attribute matching
-    is too strict and would miss aliases.
+    - If an extracted entity matches one already in history_kg or doc_kg_so_far
+      (by normalised label), replace it with the existing entity so the original
+      ID and attributes are preserved.
+    - Genuinely new entities (no match) are kept as-is.
+
+    Either way, all entities — reused and new — are returned so they all end
+    up in doc_kg. The document KG is self-contained: every entity referenced
+    by a relationship exists as a node within it.
     """
-    existing_labels = {
-        e.label.strip().lower()
-        for e in existing_kg.entities
-        if e.label
-    }
+    # Build label → entity lookup across both known sources
+    existing_by_label: dict[str, object] = {}
+    for e in (history_kg.entities + doc_kg_so_far.entities):
+        if e.label:
+            existing_by_label[e.label.strip().lower()] = e
 
-    kept: list = []
-    skipped = 0
+    resolved: list = []
+    reused = 0
     for entity in new_result.entities:
         norm = entity.label.strip().lower() if entity.label else ""
-        if norm and norm in existing_labels:
-            skipped += 1
-            print(f"  [CorrDedup] Skipped duplicate entity '{entity.label}' "
-                  f"(already in KG as same label)")
+        if norm and norm in existing_by_label:
+            # Replace with the canonical existing entity (original ID + attributes)
+            resolved.append(existing_by_label[norm])
+            reused += 1
+            print(f"  [CorrDedup] Reused existing entity '{entity.label}' "
+                  f"(id={existing_by_label[norm].id})")
         else:
-            kept.append(entity)
+            resolved.append(entity)
 
-    if skipped:
-        print(f"  [CorrDedup] Removed {skipped} duplicate(s), kept {len(kept)} new entities")
+    if reused:
+        print(f"  [CorrDedup] Reused {reused} existing entity(ies), "
+              f"{len(resolved) - reused} genuinely new")
 
     return EntityExtractionResult(
-        entities=kept,
+        entities=resolved,
         entities_to_remove=new_result.entities_to_remove,
     )
 
@@ -121,22 +128,25 @@ def _extract_page(
     raw_ent    = call_llm(system_prompt, ent_user, label=f"{label}:entities")
     ent_result = parse_and_validate(raw_ent, EntityExtractionResult, label=label)
 
-    # Fix 7: remove any entity the LLM extracted that already exists in the KG
-    ent_result = _deduplicate_against_existing(ent_result, combined_kg)
+    # Resolve extracted entities: reuse canonical history/doc entities where
+    # labels match, keep genuinely new ones. All end up in doc_kg (self-contained).
+    ent_result = _resolve_against_existing(ent_result, history_kg, doc_kg_so_far)
 
     # ── Relationship extraction ───────────────────────────────────────────────
-    combined_for_rels = KnowledgeGraph(
-        entities=doc_kg_so_far.entities + ent_result.entities,
-        relationships=doc_kg_so_far.relationships,
+    # Include history_kg entities in the relationship context so the LLM can
+    # reference existing IDs (P1, O2, etc.) when linking to history entities.
+    # These are passed as known_entities only — not added to doc_kg.
+    all_entities_for_rels = (
+        history_kg.entities + doc_kg_so_far.entities + ent_result.entities
     )
     rel_user = render_with_ontology(
         "corroboration_extraction.j2",
         entity_ontology=entity_ontology,
         relationship_ontology=relationship_ontology,
-        existing_kg=combined_for_rels,
+        existing_kg=combined_kg,   # ID seeding uses full combined KG
         page_summary=page_summary,
         document_summary=document_summary,
-        known_entities=combined_for_rels.to_serialisable()["entities"],
+        known_entities=[e.to_dict() for e in all_entities_for_rels],
         extraction_target="relationships",
         page_number=page_number,
     )

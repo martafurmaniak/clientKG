@@ -265,26 +265,15 @@ def kg_consolidation_agent(
                 updated_rels.append(r)
         relationships = updated_rels
 
-    # ── 3. Add new entities — dedup by id, rename on collision ───────────────
+    # ── 3. Add new entities (dedup by id — skip if ID already exists) ────────
     if new_entities:
-        from ontology_utils import get_id_prefix
-        import re as _re
         existing_ids = {e.id for e in entities}
         for entity in new_entities.entities:
-            eid = entity.id
-            if eid in existing_ids:
-                # ID collision: assign the next available ID for this prefix
-                prefix = get_id_prefix(entity.type)
-                current_max = max(
-                    (int(m.group(1)) for e in entities
-                     if (m := _re.search(r"(\d+)$", e.id)) and e.id.startswith(prefix)),
-                    default=0
-                )
-                new_id = f"{prefix}{current_max + 1}"
-                print(f"  [KGConsolidationAgent] ⚠ ID collision '{eid}' → renamed to '{new_id}'")
-                entity = entity.model_copy(update={"id": new_id})
-            entities.append(entity)
-            existing_ids.add(entity.id)
+            if entity.id not in existing_ids:
+                entities.append(entity)
+                existing_ids.add(entity.id)
+            # If the ID already exists, the entity is already in the KG
+            # (e.g. a history entity correctly reused). Skip silently.
 
     # ── 4. Add new relationships (dedup by source+target+type) ───────────────
     if new_relationships:
