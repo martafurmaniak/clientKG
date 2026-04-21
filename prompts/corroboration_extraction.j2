@@ -6,7 +6,7 @@ ENTITY ONTOLOGY:
   Type        : {{ e.type }}
   Description : {{ e.description }}
   Next ID     : {{ e.next_id }}  ← use this for the first new {{ e.type }}, then increment
-  label field : copy the value of "{{ e.label_from }}" attribute here
+  label       : write a short human-readable summary of this entity (e.g. "John Smith", "Alpine Bank savings account", "CHF 50k transfer to GlobalTech")
   Attributes  : {{ e.attributes | tojson }}
 {% endfor %}
 
@@ -26,7 +26,7 @@ Return ONLY entities NOT already in the graph above:
     {
       "id": "<next_id for this type — must not clash with any existing ID above>",
       "type": "<entity type from ontology>",
-      "label": "<value of the label_from attribute for this type>",
+      "label": "<concise human-readable description of this entity>",
       "attributes": {
         "<every attribute for this type>": "<value or null>"
       }
@@ -37,7 +37,7 @@ Return ONLY entities NOT already in the graph above:
 
 Rules:
 - Use ONLY ontology-defined types and attributes.
-- "label" must be a copy of the primary name attribute ({{ entity_ontology_rich | map(attribute='label_from') | list }}).
+- "label" must be a concise human-readable description of the entity (e.g. a person's full name, an account identifier with type, a transaction summary). Do NOT copy an attribute value verbatim — write it as a human would describe this node.
 - Every attribute must appear — use null if not found.
 - Do not invent values.
 
