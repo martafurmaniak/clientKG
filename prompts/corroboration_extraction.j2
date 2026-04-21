@@ -10,8 +10,13 @@ ENTITY ONTOLOGY:
   Attributes  : {{ e.attributes | tojson }}
 {% endfor %}
 
-ENTITIES ALREADY IN THE GRAPH — do NOT re-extract these; link to them by their existing ID in the relationship step:
+ENTITIES ALREADY IN THE GRAPH — do NOT create new nodes for these; use their existing IDs:
 {{ known_entities | tojson(indent=2) }}
+
+MATCHING RULE: Before extracting a new entity, check if any entity in the list above
+matches by name, alias, or description. If it matches — even partially or under a
+slightly different spelling — use the existing entity's ID in the relationship step
+instead of creating a new node.
 
 DOCUMENT SUMMARY:
 {{ document_summary }}

@@ -8,7 +8,10 @@ RELATIONSHIP ONTOLOGY — use ONLY these relationship types:
   Attributes : {{ r.attributes | tojson }}
 {% endfor %}
 
-EXTRACTED ENTITIES (use their exact IDs as source/target):
+ENTITY INDEX — all available entities across ALL pages (use these IDs as source/target even if the entity appeared on a different page):
+{{ entity_index | tojson(indent=2) }}
+
+FULL KG (for context):
 {{ kg | tojson(indent=2) }}
 
 DOCUMENT PAGE {{ page_number }}:

@@ -8,7 +8,10 @@ RELATIONSHIP ONTOLOGY — use ONLY these types:
   Attributes : {{ r.attributes | tojson }}
 {% endfor %}
 
-EXISTING KNOWLEDGE GRAPH (use entity IDs from here):
+ENTITY INDEX — all available entities across ALL pages:
+{{ entity_index | tojson(indent=2) }}
+
+EXISTING KNOWLEDGE GRAPH (for context):
 {{ kg | tojson(indent=2) }}
 
 JUDGE FEEDBACK — missing relationships to ADD:
