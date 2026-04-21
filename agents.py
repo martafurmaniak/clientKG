@@ -230,8 +230,8 @@ def _validate_ontology_compliance(
     Uses id → type lookup built from the entity list, not ID prefix parsing.
     Only validates types that are present in their respective ontologies.
     """
-    if not entity_ontology and not relationship_ontology:
-        return entities, relationships   # no-op if no ontology provided
+    # ID existence check always runs (it is ontology-independent).
+    # Attribute/type checks only run when the relevant ontology is provided.
 
     # ── Build id → type lookup ────────────────────────────────────────────────
     id_to_type: dict[str, str] = {e.id: e.type for e in entities}
@@ -262,56 +262,66 @@ def _validate_ontology_compliance(
         validated_entities.append(entity)
 
     # ── Relationship compliance ───────────────────────────────────────────────
+    valid_entity_ids: set[str] = {e.id for e in validated_entities}
     validated_relationships = []
     for rel in relationships:
         rtype = rel.type
 
-        # Unknown relationship type
-        if rtype not in relationship_ontology:
+        # ── Check source and target IDs exist in the entity list ──────────────
+        if rel.source not in valid_entity_ids:
+            print(f"  [OntologyCheck] Relationship [{rtype}]: "
+                  f"source id '{rel.source}' does not exist in KG, removed")
+            continue
+        if rel.target not in valid_entity_ids:
+            print(f"  [OntologyCheck] Relationship [{rtype}]: "
+                  f"target id '{rel.target}' does not exist in KG, removed")
+            continue
+
+        # ── Unknown relationship type ─────────────────────────────────────────
+        if relationship_ontology and rtype not in relationship_ontology:
             print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
                   f"unknown type, removed")
             continue
 
-        ont_rel      = relationship_ontology[rtype]
-        allowed_from = ont_rel.get("from", [])
-        allowed_to   = ont_rel.get("to",   [])
+        # ── Type direction checks (only when ontology is provided) ────────────
+        if relationship_ontology:
+            ont_rel      = relationship_ontology[rtype]
+            allowed_from = ont_rel.get("from", [])
+            allowed_to   = ont_rel.get("to",   [])
 
-        # Normalise to lists (ontology may store as string or list)
-        if isinstance(allowed_from, str):
-            allowed_from = [v.strip() for v in allowed_from.split("|") if v.strip()]
-        if isinstance(allowed_to, str):
-            allowed_to   = [v.strip() for v in allowed_to.split("|") if v.strip()]
+            if isinstance(allowed_from, str):
+                allowed_from = [v.strip() for v in allowed_from.split("|") if v.strip()]
+            if isinstance(allowed_to, str):
+                allowed_to   = [v.strip() for v in allowed_to.split("|") if v.strip()]
 
-        source_type = id_to_type.get(rel.source)
-        target_type = id_to_type.get(rel.target)
+            source_type = id_to_type.get(rel.source)
+            target_type = id_to_type.get(rel.target)
 
-        # Check source type
-        if allowed_from and source_type and source_type not in allowed_from:
-            print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
-                  f"source type '{source_type}' not in allowed from {allowed_from}, removed")
-            continue
+            if allowed_from and source_type and source_type not in allowed_from:
+                print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                      f"source type '{source_type}' not in allowed from {allowed_from}, removed")
+                continue
 
-        # Check target type
-        if allowed_to and target_type and target_type not in allowed_to:
-            print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
-                  f"target type '{target_type}' not in allowed to {allowed_to}, removed")
-            continue
+            if allowed_to and target_type and target_type not in allowed_to:
+                print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                      f"target type '{target_type}' not in allowed to {allowed_to}, removed")
+                continue
 
-        # Strip disallowed relationship attributes (always keep evidence)
-        allowed_raw  = ont_rel.get("attributes", {})
-        allowed_keys = (
-            set(allowed_raw.keys())
-            if isinstance(allowed_raw, dict)
-            else set(allowed_raw)
-        ) | {"evidence"}   # evidence is always permitted
+            # ── Strip disallowed attributes (keep evidence always) ────────────
+            allowed_raw  = ont_rel.get("attributes", {})
+            allowed_keys = (
+                set(allowed_raw.keys())
+                if isinstance(allowed_raw, dict)
+                else set(allowed_raw)
+            ) | {"evidence"}
 
-        bad_keys = {k for k in rel.attributes if k not in allowed_keys}
-        if bad_keys:
-            print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
-                  f"removed disallowed attributes {bad_keys}")
-            clean_attrs = {k: v for k, v in rel.attributes.items()
-                           if k not in bad_keys}
-            rel = rel.model_copy(update={"attributes": clean_attrs})
+            bad_keys = {k for k in rel.attributes if k not in allowed_keys}
+            if bad_keys:
+                print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                      f"removed disallowed attributes {bad_keys}")
+                clean_attrs = {k: v for k, v in rel.attributes.items()
+                               if k not in bad_keys}
+                rel = rel.model_copy(update={"attributes": clean_attrs})
 
         validated_relationships.append(rel)
 
@@ -322,6 +332,31 @@ def _validate_ontology_compliance(
               f"{dropped_r} relationship(s) for ontology violations")
 
     return validated_entities, validated_relationships
+
+
+def validate_kg(
+    kg: KnowledgeGraph,
+    entity_ontology: dict,
+    relationship_ontology: dict,
+) -> KnowledgeGraph:
+    """
+    Public wrapper around _validate_ontology_compliance.
+    Returns a new KnowledgeGraph with all ontology violations corrected:
+      - relationships referencing non-existent entity IDs → dropped
+      - relationships with unknown types or wrong source/target types → dropped
+      - disallowed attributes on entities or relationships → stripped
+    Call this after any operation that may introduce non-compliant data.
+    """
+    validated_entities, validated_relationships = _validate_ontology_compliance(
+        list(kg.entities),
+        list(kg.relationships),
+        entity_ontology,
+        relationship_ontology,
+    )
+    return KnowledgeGraph(
+        entities=validated_entities,
+        relationships=validated_relationships,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

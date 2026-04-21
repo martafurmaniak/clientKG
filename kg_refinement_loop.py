@@ -32,6 +32,7 @@ from agents import (
     relationship_extraction_agent,
     stray_node_agent,
     kg_curator_agent,
+    validate_kg,
 )
 from schemas import (
     KnowledgeGraph,
@@ -117,6 +118,87 @@ def _kg_signature(kg: KnowledgeGraph) -> tuple[int, int]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Stray-node + compliance unified loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_stray_compliance_loop(
+    kg_ref: list,
+    entity_ontology: dict,
+    relationship_ontology: dict,
+    document_text: str,
+    all_ontology_gaps: list,
+    prefix: str,
+) -> None:
+    """
+    Runs stray-node detection and ontology compliance validation in a tight loop
+    until BOTH are satisfied simultaneously in the same iteration:
+
+      iteration N:
+        1. stray_node_agent → add resolved relationships via consolidation
+        2. validate_kg      → strip/drop any non-compliant entities or relationships
+
+      repeat until:
+        - stray_node_agent returns "clean"  AND
+        - validate_kg produces no changes (same entity/relationship counts)
+
+    Uses a mutable list as a reference so the caller's KG variable is updated.
+    Ontology gaps are appended to all_ontology_gaps in-place.
+    """
+    for iter_n in range(1, MAX_STRAY_NODE_ITERATIONS * 2 + 1):
+        kg = kg_ref[0]
+
+        # ── Step 1: stray-node check ─────────────────────────────────────────
+        _section(f"StrayNodeAgent — stray+compliance iteration {iter_n}")
+        stray = stray_node_agent(kg, relationship_ontology, document_text)
+
+        if stray.status == "ontology_gap":
+            gaps = [g.model_dump(exclude_none=True) for g in stray.ontology_gaps]
+            all_ontology_gaps.extend(gaps)
+            print(f"  {prefix}Ontology gap(s) recorded ({len(gaps)} new) — continuing.")
+            if stray.new_relationships:
+                kg = kg_consolidation_agent(
+                    existing_kg=kg,
+                    new_relationships=RelationshipExtractionResult(
+                        relationships=stray.new_relationships
+                    ),
+                    entity_ontology=entity_ontology,
+                    relationship_ontology=relationship_ontology,
+                )
+            # Fall through to compliance step even on gap — validate what we have
+            stray_clean = False
+        elif stray.status == "resolved":
+            kg = kg_consolidation_agent(
+                existing_kg=kg,
+                new_relationships=RelationshipExtractionResult(
+                    relationships=stray.new_relationships
+                ),
+                entity_ontology=entity_ontology,
+                relationship_ontology=relationship_ontology,
+            )
+            stray_clean = False
+        else:
+            stray_clean = True   # "clean"
+
+        # ── Step 2: ontology compliance ──────────────────────────────────────
+        _section(f"OntologyCompliance — stray+compliance iteration {iter_n}")
+        e_before = len(kg.entities)
+        r_before = len(kg.relationships)
+        kg = validate_kg(kg, entity_ontology, relationship_ontology)
+        compliance_clean = (
+            len(kg.entities) == e_before and
+            len(kg.relationships) == r_before
+        )
+
+        kg_ref[0] = kg
+
+        if stray_clean and compliance_clean:
+            _section("All nodes connected and KG fully compliant")
+            break
+    else:
+        print(f"  {prefix}⚠ Stray+compliance loop hit max iterations.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Core refinement loop
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -166,25 +248,16 @@ def run_refinement_loop(
         )
 
         if curator.status == "complete":
-            _section("KG deemed complete — running final stray-node check")
-            # Still run one stray-node pass to catch any connectivity issues
-            # before declaring the graph done
-            _final_stray = stray_node_agent(kg, relationship_ontology, document_text)
-            if _final_stray.status != "clean":
-                if _final_stray.new_relationships:
-                    kg = kg_consolidation_agent(
-                        existing_kg=kg,
-                        new_relationships=RelationshipExtractionResult(
-                            relationships=_final_stray.new_relationships
-                        ),
-                        entity_ontology=entity_ontology,
-                        relationship_ontology=relationship_ontology,
-                    )
-                if _final_stray.ontology_gaps:
-                    all_ontology_gaps.extend(
-                        g.model_dump(exclude_none=True)
-                        for g in _final_stray.ontology_gaps
-                    )
+            _section("KG deemed complete — running stray-node + compliance check")
+            _run_stray_compliance_loop(
+                kg_ref=[kg],
+                entity_ontology=entity_ontology,
+                relationship_ontology=relationship_ontology,
+                document_text=document_text,
+                all_ontology_gaps=all_ontology_gaps,
+                prefix=prefix,
+            )
+            kg = kg_ref[0]
             break
 
         # ── Apply curator actions ─────────────────────────────────────────────
@@ -292,49 +365,40 @@ def run_refinement_loop(
                   "exiting curator loop early.")
             break
 
-        # ── Stray node check AFTER curator (Fix 1) ────────────────────────────
-        _banner(f"{prefix}Stray Node Check (after curator iteration {completeness_iter})")
-
-        for stray_iter in range(1, MAX_STRAY_NODE_ITERATIONS + 1):
-            _section(f"StrayNodeAgent — iteration {stray_iter}")
-            stray = stray_node_agent(kg, relationship_ontology, document_text)
-
-            if stray.status == "ontology_gap":
-                gaps = [g.model_dump(exclude_none=True) for g in stray.ontology_gaps]
-                all_ontology_gaps.extend(gaps)
-                print(f"  {prefix}Ontology gap(s) recorded ({len(gaps)} new, "
-                      f"{len(all_ontology_gaps)} total) — continuing.")
-                if stray.new_relationships:
-                    kg = kg_consolidation_agent(
-                        existing_kg=kg,
-                        new_relationships=RelationshipExtractionResult(
-                            relationships=stray.new_relationships
-                        ),
-                        entity_ontology=entity_ontology,
-                        relationship_ontology=relationship_ontology,
-                    )
-                break
-
-            if stray.status == "clean":
-                _section("All nodes connected")
-                break
-
-            _section("KGConsolidationAgent — adding resolved stray-node relationships")
-            kg = kg_consolidation_agent(
-                existing_kg=kg,
-                new_relationships=RelationshipExtractionResult(
-                    relationships=stray.new_relationships
-                ),
-                entity_ontology=entity_ontology,
-                relationship_ontology=relationship_ontology,
-            )
-        else:
-            print(f"  {prefix}⚠ Stray node loop hit max ({MAX_STRAY_NODE_ITERATIONS}).")
+        # ── Stray-node + compliance loop ──────────────────────────────────────
+        # Runs after every curator pass AND as a final guaranteed pass after the
+        # outer loop exits. Iterates until BOTH conditions are true simultaneously:
+        #   1. No stray nodes (stray_node_agent returns "clean")
+        #   2. Full ontology compliance (validate_kg produces no changes)
+        _banner(f"{prefix}Stray-Node + Compliance Loop (curator iter {completeness_iter})")
+        _kg_ref = [kg]
+        _run_stray_compliance_loop(
+            kg_ref=_kg_ref,
+            entity_ontology=entity_ontology,
+            relationship_ontology=relationship_ontology,
+            document_text=document_text,
+            all_ontology_gaps=all_ontology_gaps,
+            prefix=prefix,
+        )
+        kg = _kg_ref[0]
 
     else:
         print(f"  {prefix}⚠ Curator loop hit max ({MAX_COMPLETENESS_ITERATIONS}). Proceeding.")
 
-    # Final stray-node pass if loop exited via max iterations
+    # ── Guaranteed final stray-node + compliance pass ─────────────────────────
+    # Catches any stray nodes introduced on the last curator iteration.
+    _banner(f"{prefix}Final Stray-Node + Compliance Pass")
+    _kg_ref_final = [kg]
+    _run_stray_compliance_loop(
+        kg_ref=_kg_ref_final,
+        entity_ontology=entity_ontology,
+        relationship_ontology=relationship_ontology,
+        document_text=document_text,
+        all_ontology_gaps=all_ontology_gaps,
+        prefix=prefix,
+    )
+    kg = _kg_ref_final[0]
+
     gap_report = {
         "total_gaps": len(all_ontology_gaps),
         "gaps": all_ontology_gaps,
