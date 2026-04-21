@@ -1,9 +1,15 @@
 Correct the knowledge graph for entity types: {{ entity_types | join(", ") }}.
 
 ENTITY ONTOLOGY:
-{{ ontology_subset | tojson(indent=2) }}
+{% for e in entity_ontology_rich %}
+  Type        : {{ e.type }}
+  Description : {{ e.description }}
+  Next ID     : {{ e.next_id }}  ← use this for the first new {{ e.type }}, then increment
+  label field : copy the value of "{{ e.label_from }}" attribute here
+  Attributes  : {{ e.attributes | tojson }}
+{% endfor %}
 
-EXISTING ENTITIES IN KG (for these types):
+EXISTING ENTITIES IN KG (do NOT re-extract these):
 {{ existing_for_types | tojson(indent=2) }}
 
 JUDGE FEEDBACK — missing entities to ADD:
@@ -12,25 +18,30 @@ JUDGE FEEDBACK — missing entities to ADD:
 JUDGE FEEDBACK — hallucinated entity IDs to REMOVE:
 {{ relevant_hallucinated | tojson(indent=2) }}
 
-SOURCE TEXT (only the relevant page):
+SOURCE TEXT:
 {{ page_text }}
 
-Return a JSON object:
+Return ONLY new entities to add (do not re-list existing ones):
+
 {
   "entities": [
     {
-      "id":    "<unique id, must not clash with existing IDs above>",
-      "type":  "<entity type from ontology>",
-      "label": "<short human-readable name>",
+      "id": "<next_id for this type — must not clash with existing IDs above>",
+      "type": "<entity type from ontology>",
+      "label": "<value of the label_from attribute for this type>",
       "attributes": {
-        "<attr>": "<value or null>"
+        "<every attribute for this type>": "<value or null>"
       }
     }
   ],
   "entities_to_remove": ["<entity_id_to_drop>"]
 }
 
-Only include NEW entities that need to be added. Do NOT re-list already-correct entities.
+Rules:
+- Use ONLY ontology-defined types and attributes.
+- "label" must be a copy of the primary name attribute ({{ entity_ontology_rich | map(attribute='label_from') | list }}).
+- Every attribute must appear — use null if not found.
+- IDs must not clash with existing IDs shown above.
 {% if custom_instructions %}
 
 ADDITIONAL INSTRUCTIONS:

@@ -1,27 +1,34 @@
 {% if extraction_target == "entities" %}
-Extract entities from the corroboration document page below.
+Extract entities from the corroboration document page, following the ontology exactly.
 
-ENTITY ONTOLOGY (extract only these types):
-{{ entity_ontology | tojson(indent=2) }}
+ENTITY ONTOLOGY:
+{% for e in entity_ontology_rich %}
+  Type        : {{ e.type }}
+  Description : {{ e.description }}
+  Next ID     : {{ e.next_id }}  ← use this for the first new {{ e.type }}, then increment
+  label field : copy the value of "{{ e.label_from }}" attribute here
+  Attributes  : {{ e.attributes | tojson }}
+{% endfor %}
 
-KNOWN ENTITIES FROM CLIENT HISTORY (link to these where possible, do NOT re-extract them):
+ENTITIES ALREADY IN THE GRAPH — do NOT re-extract these; link to them by their existing ID in the relationship step:
 {{ known_entities | tojson(indent=2) }}
 
-DOCUMENT SUMMARY (full document context):
+DOCUMENT SUMMARY:
 {{ document_summary }}
 
 PAGE {{ page_number }} SUMMARY:
 {{ page_summary }}
 
-Return a JSON object:
+Return ONLY entities NOT already in the graph above:
+
 {
   "entities": [
     {
-      "id":    "<type_prefix>_corr_<number>",
-      "type":  "<entity type from ontology>",
-      "label": "<short human-readable name>",
+      "id": "<next_id for this type — must not clash with any existing ID above>",
+      "type": "<entity type from ontology>",
+      "label": "<value of the label_from attribute for this type>",
       "attributes": {
-        "<attr>": "<value or null>"
+        "<every attribute for this type>": "<value or null>"
       }
     }
   ],
@@ -29,20 +36,26 @@ Return a JSON object:
 }
 
 Rules:
-- Only extract entities that are NOT already in the known entities list above.
-- If an entity from this page matches a known entity, do NOT re-extract it — you will be able to link to it by its existing id in the relationship step.
-- Use the prefix "_corr_" in ids to distinguish corroboration entities (e.g. "person_corr_1").
+- Use ONLY ontology-defined types and attributes.
+- "label" must be a copy of the primary name attribute ({{ entity_ontology_rich | map(attribute='label_from') | list }}).
+- Every attribute must appear — use null if not found.
+- Do not invent values.
 
 {% else %}
-Extract relationships from the corroboration document page below.
+Extract relationships from the corroboration document page, following the ontology exactly.
 
-RELATIONSHIP ONTOLOGY (only use these types):
-{{ relationship_ontology | tojson(indent=2) }}
+RELATIONSHIP ONTOLOGY:
+{% for r in relationship_ontology_rich %}
+  Type       : {{ r.type }}
+  Description: {{ r.description }}
+  From       : {{ r.from | join(" or ") }}  →  To: {{ r.to | join(" or ") }}
+  Attributes : {{ r.attributes | tojson }}
+{% endfor %}
 
-ALL AVAILABLE ENTITIES (history KG + newly extracted from this document so far):
+ALL AVAILABLE ENTITIES (use their exact IDs as source/target):
 {{ known_entities | tojson(indent=2) }}
 
-DOCUMENT SUMMARY (full document context):
+DOCUMENT SUMMARY:
 {{ document_summary }}
 
 PAGE {{ page_number }} SUMMARY:
@@ -57,7 +70,7 @@ Return:
       "target": "<entity id>",
       "attributes": {
         "evidence": "<verbatim or paraphrased quote supporting this relationship>",
-        "<attr_name>": "<attr_value or null>"
+        "<every other attribute for this type>": "<value or null>"
       }
     }
   ],
@@ -65,8 +78,10 @@ Return:
 }
 
 Rules:
-- "evidence" is REQUIRED on every relationship — never leave it empty.
-- Include ALL attributes defined for the relationship type in the ontology.
+- Use ONLY ontology-defined relationship types.
+- source/target must match the allowed From/To types.
+- Every defined attribute must appear — use null if not found.
+- "evidence" is REQUIRED — never leave it empty.
 - Do NOT include a "reasoning" field.
-- You may link entities from the history KG to entities from this document.
+- You may link history KG entities to new corroboration entities.
 {% endif %}

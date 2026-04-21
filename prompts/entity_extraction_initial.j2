@@ -1,25 +1,40 @@
-Extract all entities of the following types from the document.
+Extract all entities from the document, following the ontology exactly.
 
-ENTITY TYPES AND THEIR ATTRIBUTES (ontology):
-{{ ontology_subset | tojson(indent=2) }}
+ENTITY ONTOLOGY:
+{% for e in entity_ontology_rich %}
+  Type        : {{ e.type }}
+  Description : {{ e.description }}
+  Next ID     : {{ e.next_id }}  ← assign this ID to the first extracted {{ e.type }}, then {{ e.id_prefix }}+1 for each additional one
+  label field : copy the value of "{{ e.label_from }}" attribute here
+  Attributes  : {{ e.attributes | tojson }}
+{% endfor %}
 
 DOCUMENT:
 {{ document_text }}
 
-Return a JSON object:
+Return a JSON object with this exact structure.
+Each entity object must have EVERY attribute listed for its type (null if not found in document):
+
 {
   "entities": [
+{% for e in entity_ontology_rich %}
     {
-      "id":    "<snake_case_type_prefix>_<number>",
-      "type":  "<entity type from ontology>",
-      "label": "<short human-readable name>",
-      "attributes": {
-        "<attr>": "<value or null>"
-      }
-    }
+      "id": "{{ e.next_id }}",
+      "type": "{{ e.type }}",
+      "label": "<value of {{ e.label_from }}>",
+      "attributes": {{ "{" }}{% if e.attributes is mapping %}{% for attr, atype in e.attributes.items() %}"{{ attr }}": null{% if not loop.last %}, {% endif %}{% endfor %}{% else %}{% for attr in e.attributes %}"{{ attr }}": null{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}{{ "}" }}
+    }{% if not loop.last %},{% endif %}
+{% endfor %}
   ],
   "entities_to_remove": []
 }
+
+Rules:
+- Use ONLY the entity types and attributes defined in the ontology.
+- IDs must follow the prefix shown (e.g. Person → P1, P2; Account → A1, A2).
+- "label" must be a copy of the {{ entity_ontology_rich | map(attribute='label_from') | list }} attribute value respectively.
+- Every attribute must appear — use null if not found in the document.
+- Do not invent values.
 {% if custom_instructions %}
 
 ADDITIONAL INSTRUCTIONS:

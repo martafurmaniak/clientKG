@@ -1,4 +1,15 @@
 Review the knowledge graph against the source document and produce a curation plan.
+Ensure all entities and relationships in your recommendations adhere to the ontology below.
+
+ENTITY ONTOLOGY (all additions and updates must use these types and attributes only):
+{% for e in entity_ontology_rich %}
+  {{ e.type }} (next ID to assign: {{ e.next_id }}): {{ e.attributes | tojson }}
+{% endfor %}
+
+RELATIONSHIP ONTOLOGY (all additions must use these types only):
+{% for r in relationship_ontology_rich %}
+  {{ r.type }}: From {{ r.from | join("/") }} → To {{ r.to | join("/") }}, attributes: {{ r.attributes | tojson }}
+{% endfor %}
 
 KNOWLEDGE GRAPH:
 {{ kg | tojson(indent=2) }}
@@ -86,4 +97,7 @@ Rules:
 - page_number is the 0-based index of the page where the evidence appears. Use null if unknown.
 - For alias/duplicate cases: add the alias to the correct entity's attributes_patch under update_entities AND add the duplicate node id to remove_entities.
 - Set status "complete" only when all six action lists are empty.
+- All add_entities and update_entities must use only ontology-defined types and attributes.
+- All add_relationships must use only ontology-defined relationship types with correct from/to entity types.
+- IDs for new entities must follow the stable format shown in the ontology (e.g. P1/P2, O1, A1).
 - Use empty lists [] for action categories that have no items.
