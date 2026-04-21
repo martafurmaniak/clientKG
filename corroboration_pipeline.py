@@ -195,6 +195,8 @@ def run_corroboration_document(
             existing_kg=doc_kg,
             new_entities=ent_result,
             new_relationships=rel_result,
+            entity_ontology=entity_ontology,
+            relationship_ontology=relationship_ontology,
         )
 
     print(f"  ── Initial extraction complete: {len(doc_kg.entities)} entities, "

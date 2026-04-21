@@ -177,6 +177,8 @@ def run_refinement_loop(
                         new_relationships=RelationshipExtractionResult(
                             relationships=_final_stray.new_relationships
                         ),
+                        entity_ontology=entity_ontology,
+                        relationship_ontology=relationship_ontology,
                     )
                 if _final_stray.ontology_gaps:
                     all_ontology_gaps.extend(
@@ -274,11 +276,11 @@ def run_refinement_loop(
             new_entities=merged_entity_update,
             new_relationships=merged_rel_update,
             entities_to_remove=remove_entity_ids,
-            # Fix 10: relationship removals by (source, target, type) key
             relationship_keys_to_remove=remove_rel_keys if remove_rel_keys else None,
-            # Fix 4: update_entities go straight to consolidation, no agent re-run
             entities_to_update=curator.update_entities or None,
             relationships_to_update=curator.update_relationships or None,
+            entity_ontology=entity_ontology,
+            relationship_ontology=relationship_ontology,
         )
 
         # ── Fix 9: early exit if no net change ───────────────────────────────
@@ -308,6 +310,8 @@ def run_refinement_loop(
                         new_relationships=RelationshipExtractionResult(
                             relationships=stray.new_relationships
                         ),
+                        entity_ontology=entity_ontology,
+                        relationship_ontology=relationship_ontology,
                     )
                 break
 
@@ -321,6 +325,8 @@ def run_refinement_loop(
                 new_relationships=RelationshipExtractionResult(
                     relationships=stray.new_relationships
                 ),
+                entity_ontology=entity_ontology,
+                relationship_ontology=relationship_ontology,
             )
         else:
             print(f"  {prefix}⚠ Stray node loop hit max ({MAX_STRAY_NODE_ITERATIONS}).")

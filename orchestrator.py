@@ -70,6 +70,8 @@ def run_pipeline(
     kg: KnowledgeGraph = kg_consolidation_agent(
         existing_kg=KnowledgeGraph(),
         new_entities=combined_entities,
+        entity_ontology=entity_ontology,
+        relationship_ontology=relationship_ontology,
     )
 
     # ── Phase 2: Relationship Extraction ─────────────────────────────────────
@@ -83,7 +85,11 @@ def run_pipeline(
     )
 
     _section("KGConsolidationAgent — merging relationships")
-    kg = kg_consolidation_agent(existing_kg=kg, new_relationships=rel_result)
+    kg = kg_consolidation_agent(
+        existing_kg=kg, new_relationships=rel_result,
+        entity_ontology=entity_ontology,
+        relationship_ontology=relationship_ontology,
+    )
 
     # ── Phases 3+4: Stray node + curator loop (shared) ───────────────────────
     refinement = run_refinement_loop(

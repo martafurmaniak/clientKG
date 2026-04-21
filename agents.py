@@ -204,6 +204,127 @@ def transactions_agent(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 2a. Ontology compliance validator  (pure Python, no LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _validate_ontology_compliance(
+    entities: list,
+    relationships: list,
+    entity_ontology: dict,
+    relationship_ontology: dict,
+) -> tuple[list, list]:
+    """
+    Enforce ontology compliance on a fully merged entity + relationship list.
+
+    Entity pass:
+      - Unknown entity types (not in ontology) → logged and passed through unchanged
+      - Attribute keys not defined in the ontology for the entity type → removed
+
+    Relationship pass:
+      - Unknown relationship types → removed entirely
+      - source entity type not in ontology allowed "from" list → removed
+      - target entity type not in ontology allowed "to" list → removed
+      - Attribute keys not defined in ontology for the relationship type → removed
+        (evidence is always preserved regardless)
+
+    Uses id → type lookup built from the entity list, not ID prefix parsing.
+    Only validates types that are present in their respective ontologies.
+    """
+    if not entity_ontology and not relationship_ontology:
+        return entities, relationships   # no-op if no ontology provided
+
+    # ── Build id → type lookup ────────────────────────────────────────────────
+    id_to_type: dict[str, str] = {e.id: e.type for e in entities}
+
+    # ── Entity attribute compliance ───────────────────────────────────────────
+    validated_entities = []
+    for entity in entities:
+        etype = entity.type
+        if etype not in entity_ontology:
+            validated_entities.append(entity)   # unknown type — pass through
+            continue
+
+        allowed_raw = entity_ontology[etype].get("attributes", {})
+        allowed_keys = (
+            set(allowed_raw.keys())
+            if isinstance(allowed_raw, dict)
+            else set(allowed_raw)
+        )
+
+        bad_keys = {k for k in entity.attributes if k not in allowed_keys}
+        if bad_keys:
+            print(f"  [OntologyCheck] Entity {entity.id} ({etype}): "
+                  f"removed disallowed attributes {bad_keys}")
+            clean_attrs = {k: v for k, v in entity.attributes.items()
+                           if k not in bad_keys}
+            entity = entity.model_copy(update={"attributes": clean_attrs})
+
+        validated_entities.append(entity)
+
+    # ── Relationship compliance ───────────────────────────────────────────────
+    validated_relationships = []
+    for rel in relationships:
+        rtype = rel.type
+
+        # Unknown relationship type
+        if rtype not in relationship_ontology:
+            print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                  f"unknown type, removed")
+            continue
+
+        ont_rel      = relationship_ontology[rtype]
+        allowed_from = ont_rel.get("from", [])
+        allowed_to   = ont_rel.get("to",   [])
+
+        # Normalise to lists (ontology may store as string or list)
+        if isinstance(allowed_from, str):
+            allowed_from = [v.strip() for v in allowed_from.split("|") if v.strip()]
+        if isinstance(allowed_to, str):
+            allowed_to   = [v.strip() for v in allowed_to.split("|") if v.strip()]
+
+        source_type = id_to_type.get(rel.source)
+        target_type = id_to_type.get(rel.target)
+
+        # Check source type
+        if allowed_from and source_type and source_type not in allowed_from:
+            print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                  f"source type '{source_type}' not in allowed from {allowed_from}, removed")
+            continue
+
+        # Check target type
+        if allowed_to and target_type and target_type not in allowed_to:
+            print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                  f"target type '{target_type}' not in allowed to {allowed_to}, removed")
+            continue
+
+        # Strip disallowed relationship attributes (always keep evidence)
+        allowed_raw  = ont_rel.get("attributes", {})
+        allowed_keys = (
+            set(allowed_raw.keys())
+            if isinstance(allowed_raw, dict)
+            else set(allowed_raw)
+        ) | {"evidence"}   # evidence is always permitted
+
+        bad_keys = {k for k in rel.attributes if k not in allowed_keys}
+        if bad_keys:
+            print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                  f"removed disallowed attributes {bad_keys}")
+            clean_attrs = {k: v for k, v in rel.attributes.items()
+                           if k not in bad_keys}
+            rel = rel.model_copy(update={"attributes": clean_attrs})
+
+        validated_relationships.append(rel)
+
+    dropped_e = len(entities)      - len(validated_entities)
+    dropped_r = len(relationships) - len(validated_relationships)
+    if dropped_e or dropped_r:
+        print(f"  [OntologyCheck] Summary: dropped {dropped_e} entity(ies), "
+              f"{dropped_r} relationship(s) for ontology violations")
+
+    return validated_entities, validated_relationships
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. KG Consolidation agent  (deterministic — no LLM)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -216,6 +337,8 @@ def kg_consolidation_agent(
     relationship_keys_to_remove: list[tuple] | None = None,
     entities_to_update: list | None = None,
     relationships_to_update: list | None = None,
+    entity_ontology: dict | None = None,
+    relationship_ontology: dict | None = None,
 ) -> KnowledgeGraph:
     """
     Pure deterministic merge — no LLM call.
@@ -226,7 +349,9 @@ def kg_consolidation_agent(
       3. Append new entities (dedup by id)
       4. Append new relationships (dedup by source+target+type)
       5. Remove entities by ID + cascade to orphaned relationships
-      6. Remove relationships by (source, target, type) key  [Fix 10]
+      6. Remove relationships by (source, target, type) key
+      7. Ontology compliance validation (strip bad attributes, remove
+         relationships with wrong source/target types or unknown types)
     """
     entities:      list = list(existing_kg.entities)
     relationships: list = list(existing_kg.relationships)
@@ -307,6 +432,14 @@ def kg_consolidation_agent(
         removed_rels = before - len(relationships)
     else:
         removed_rels = 0
+
+    # ── 7. Ontology compliance validation ─────────────────────────────────────
+    if entity_ontology or relationship_ontology:
+        entities, relationships = _validate_ontology_compliance(
+            entities, relationships,
+            entity_ontology       or {},
+            relationship_ontology or {},
+        )
 
     kg = KnowledgeGraph(entities=entities, relationships=relationships)
     print(f"  [KGConsolidationAgent] entities={len(kg.entities)}  relationships={len(kg.relationships)}"
