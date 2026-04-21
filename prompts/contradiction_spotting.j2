@@ -1,0 +1,27 @@
+Analyse the knowledge graph and document for contradictions.
+
+KNOWLEDGE GRAPH:
+{{ kg | tojson(indent=2) }}
+
+SOURCE DOCUMENT:
+{{ document_text }}
+
+Look for:
+- Conflicting attribute values for the same entity
+- Relationships that contradict each other
+- Transactions inconsistent with stated roles or relationships
+- Any other logical inconsistency
+
+Return:
+{
+  "contradictions": [
+    {
+      "description": "...",
+      "entities_involved": ["id1", "id2"],
+      "evidence": "..."
+    }
+  ],
+  "assessment": "Overall summary."
+}
+
+Return an empty list if no contradictions found.

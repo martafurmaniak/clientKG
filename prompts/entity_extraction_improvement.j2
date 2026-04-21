@@ -1,0 +1,38 @@
+Correct the knowledge graph for entity types: {{ entity_types | join(", ") }}.
+
+ENTITY ONTOLOGY:
+{{ ontology_subset | tojson(indent=2) }}
+
+EXISTING ENTITIES IN KG (for these types):
+{{ existing_for_types | tojson(indent=2) }}
+
+JUDGE FEEDBACK — missing entities to ADD:
+{{ relevant_missing | tojson(indent=2) }}
+
+JUDGE FEEDBACK — hallucinated entity IDs to REMOVE:
+{{ relevant_hallucinated | tojson(indent=2) }}
+
+SOURCE TEXT (only the relevant page):
+{{ page_text }}
+
+Return a JSON object:
+{
+  "entities": [
+    {
+      "id":    "<unique id, must not clash with existing IDs above>",
+      "type":  "<entity type from ontology>",
+      "label": "<short human-readable name>",
+      "attributes": {
+        "<attr>": "<value or null>"
+      }
+    }
+  ],
+  "entities_to_remove": ["<entity_id_to_drop>"]
+}
+
+Only include NEW entities that need to be added. Do NOT re-list already-correct entities.
+{% if custom_instructions %}
+
+ADDITIONAL INSTRUCTIONS:
+{{ custom_instructions }}
+{% endif %}

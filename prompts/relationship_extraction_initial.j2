@@ -1,0 +1,31 @@
+Extract relationships from the document page below.
+
+RELATIONSHIP ONTOLOGY (only use these relationship types):
+{{ relationship_ontology | tojson(indent=2) }}
+
+EXTRACTED ENTITIES (use their exact IDs):
+{{ kg | tojson(indent=2) }}
+
+DOCUMENT PAGE {{ page_number }}:
+{{ page_text }}
+
+Return:
+{
+  "relationships": [
+    {
+      "type": "<ONTOLOGY_TYPE>",
+      "source": "<entity id>",
+      "target": "<entity id>",
+      "attributes": {
+        "evidence": "<short text evidence>",
+        "<attr_name>": "<attr_value or null>"
+      }
+    }
+  ],
+  "relationships_to_remove": []
+}
+
+For each relationship:
+- "evidence" is REQUIRED — always include a verbatim or paraphrased quote from the document that supports this relationship. Never leave it empty or null.
+- Include ALL attributes defined for that relationship type in the ontology (see the "attributes" field). Use null for unknown values.
+- Do NOT include a "reasoning" field.

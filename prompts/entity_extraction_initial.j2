@@ -1,0 +1,27 @@
+Extract all entities of the following types from the document.
+
+ENTITY TYPES AND THEIR ATTRIBUTES (ontology):
+{{ ontology_subset | tojson(indent=2) }}
+
+DOCUMENT:
+{{ document_text }}
+
+Return a JSON object:
+{
+  "entities": [
+    {
+      "id":    "<snake_case_type_prefix>_<number>",
+      "type":  "<entity type from ontology>",
+      "label": "<short human-readable name>",
+      "attributes": {
+        "<attr>": "<value or null>"
+      }
+    }
+  ],
+  "entities_to_remove": []
+}
+{% if custom_instructions %}
+
+ADDITIONAL INSTRUCTIONS:
+{{ custom_instructions }}
+{% endif %}

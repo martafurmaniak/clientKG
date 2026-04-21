@@ -1,0 +1,34 @@
+These entities currently have NO relationships in the KG.
+
+STRAY ENTITIES:
+{{ stray_entities | tojson(indent=2) }}
+
+FULL KNOWLEDGE GRAPH:
+{{ kg | tojson(indent=2) }}
+
+RELATIONSHIP ONTOLOGY:
+{{ relationship_ontology | tojson(indent=2) }}
+
+DOCUMENT:
+{{ document_text }}
+
+For each stray entity:
+1. Try to find at least one relationship to another entity in the KG using only ontology types.
+2. If no ontology type fits, add to ontology_gaps.
+
+Return:
+{
+  "new_relationships": [
+    {
+      "source": "<entity id>",
+      "target": "<entity id>",
+      "type": "<ontology type>",
+      "attributes": {
+        "evidence": "<verbatim or paraphrased quote from document>"
+      }
+    }
+  ],
+  "ontology_gaps": [
+    {"entity_id": "<id>", "reasoning": "...", "evidence": "..."}
+  ]
+}

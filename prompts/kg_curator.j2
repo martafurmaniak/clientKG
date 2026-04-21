@@ -1,0 +1,89 @@
+Review the knowledge graph against the source document and produce a curation plan.
+
+KNOWLEDGE GRAPH:
+{{ kg | tojson(indent=2) }}
+
+SOURCE DOCUMENT (pages numbered from 0):
+{{ numbered_pages }}
+
+Return a JSON object with exactly these keys:
+
+{
+  "status": "complete" or "needs_improvement",
+
+  "add_entities": [
+    {
+      "entity_type": "<exact ontology type key>",
+      "name": "<name of the missing entity>",
+      "reasoning": "<why it should be added>",
+      "evidence": "<quote or paraphrase from document>",
+      "page_number": <0-based int>
+    }
+  ],
+
+  "add_relationships": [
+    {
+      "type": "<ONTOLOGY_TYPE>",
+      "from": "<entity name or id>",
+      "to": "<entity name or id>",
+      "reasoning": "<why it should be added>",
+      "evidence": "<quote or paraphrase from document>",
+      "page_number": <0-based int>
+    }
+  ],
+
+  "remove_entities": [
+    {
+      "entity_id": "<id of entity to remove>",
+      "reasoning": "<why it should be removed, e.g. hallucinated, duplicate alias>",
+      "evidence": "<supporting evidence>",
+      "page_number": <0-based int or null>
+    }
+  ],
+
+  "remove_relationships": [
+    {
+      "source": "<source entity id>",
+      "target": "<target entity id>",
+      "type": "<RELATIONSHIP_TYPE>",
+      "reasoning": "<why it should be removed>",
+      "evidence": "<supporting evidence>",
+      "page_number": <0-based int or null>
+    }
+  ],
+
+  "update_entities": [
+    {
+      "entity_id": "<id of entity to update>",
+      "attributes_patch": {
+        "<attr>": "<corrected or enriched value>"
+      },
+      "reasoning": "<why these attributes need updating, e.g. alias found, field was null>",
+      "evidence": "<quote or paraphrase from document>",
+      "page_number": <0-based int or null>
+    }
+  ],
+
+  "update_relationships": [
+    {
+      "source": "<source entity id>",
+      "target": "<target entity id>",
+      "type": "<RELATIONSHIP_TYPE>",
+      "attributes_patch": {
+        "<attr>": "<corrected or enriched value>"
+      },
+      "reasoning": "<why these attributes need updating>",
+      "evidence": "<quote or paraphrase from document>",
+      "page_number": <0-based int or null>
+    }
+  ],
+
+  "reasoning": "<overall assessment>"
+}
+
+Rules:
+- attributes_patch must contain the COMPLETE intended attribute dict, not just the changed fields.
+- page_number is the 0-based index of the page where the evidence appears. Use null if unknown.
+- For alias/duplicate cases: add the alias to the correct entity's attributes_patch under update_entities AND add the duplicate node id to remove_entities.
+- Set status "complete" only when all six action lists are empty.
+- Use empty lists [] for action categories that have no items.

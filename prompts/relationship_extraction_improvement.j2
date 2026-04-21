@@ -1,0 +1,38 @@
+Correct relationships in the knowledge graph.
+
+RELATIONSHIP ONTOLOGY (only use these types):
+{{ relationship_ontology | tojson(indent=2) }}
+
+EXISTING KNOWLEDGE GRAPH (use entity IDs from here):
+{{ kg | tojson(indent=2) }}
+
+JUDGE FEEDBACK — missing relationships to ADD:
+{{ missing_relationships | tojson(indent=2) }}
+
+JUDGE FEEDBACK — hallucinated relationship IDs to REMOVE:
+{{ hallucinated_relationships | tojson(indent=2) }}
+
+DOCUMENT PAGE {{ page_number }}:
+{{ page_text }}
+
+Return:
+{
+  "relationships": [
+    {
+      "type": "<ONTOLOGY_TYPE>",
+      "source": "<entity id>",
+      "target": "<entity id>",
+      "attributes": {
+        "evidence": "<short text evidence>",
+        "<attr_name>": "<attr_value or null>"
+      }
+    }
+  ],
+  "relationships_to_remove": ["<rel_source>_<rel_target>_<rel_type>"]
+}
+
+For each relationship:
+- "evidence" is REQUIRED — always include a verbatim or paraphrased quote from the document that supports this relationship. Never leave it empty or null.
+- Include ALL attributes defined for that relationship type in the ontology (see the "attributes" field). Use null for unknown values.
+- Do NOT include a "reasoning" field.
+Only include NEW relationships. Do NOT repeat existing correct ones.
