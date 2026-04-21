@@ -176,7 +176,7 @@ def build_entity_prompt_ontology(
       - id_prefix    : the stable ID prefix  e.g. "P", "A", "AS"
       - next_id      : the exact next ID the LLM should assign  e.g. "P3"
                        (derived from the current KG state — no clashes)
-      - attributes   : attribute definitions
+      - attributes   : full attribute definitions from the ontology
 
     Example output (with P1, P2 already in KG):
       [
@@ -190,31 +190,18 @@ def build_entity_prompt_ontology(
         ...
       ]
     """
-    label_priority = [
-        "fullName", "legalName", "name", "companyName", "accountId",
-        "transactionId", "title", "identifier",
-    ]
-
     result = []
     for etype, body in entity_ontology.items():
-        prefix  = get_id_prefix(etype)
-        next_id = (next_id_map or {}).get(etype, f"{prefix}1")
-
-        # Determine which attribute should be used as the entity label
+        prefix   = get_id_prefix(etype)
+        next_id  = (next_id_map or {}).get(etype, f"{prefix}1")
         attrs_raw = body.get("attributes", {})
-        attr_names = list(attrs_raw.keys()) if isinstance(attrs_raw, dict) else list(attrs_raw)
-        label_from = next(
-            (a for a in label_priority if a in attr_names),
-            attr_names[0] if attr_names else "id"
-        )
 
         result.append({
             "type":        etype,
             "description": body.get("description", ""),
             "id_prefix":   prefix,
             "next_id":     next_id,
-            "label_from":  label_from,   # which attribute to use as the label
-            "attributes":  attrs_raw,    # full dict (name → type) or list
+            "attributes":  attrs_raw,
         })
     return result
 

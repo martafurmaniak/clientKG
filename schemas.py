@@ -38,6 +38,14 @@ class Entity(BaseModel):
     label: str = ""
     attributes: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("label", mode="before")
+    @classmethod
+    def coerce_label(cls, v: Any) -> str:
+        """Coerce None/null from LLM to empty string rather than failing validation."""
+        if v is None:
+            return ""
+        return str(v)
+
     @model_validator(mode="before")
     @classmethod
     def absorb_extra_fields(cls, data: Any) -> Any:
@@ -47,6 +55,8 @@ class Entity(BaseModel):
         and the flat LLM format where attributes are top-level:
             {"id": "p1", "type": "Person", "label": "John", "fullName": "John", "age": 45}
         Extra keys beyond id/type/label are packed into attributes.
+        label is set to "" if missing or null — the LLM is responsible for
+        providing a meaningful free-form human-readable value.
         """
         if not isinstance(data, dict):
             return data
@@ -58,7 +68,7 @@ class Entity(BaseModel):
         return {
             "id":         data.get("id", ""),
             "type":       data.get("type", ""),
-            "label":      data.get("label", ""),
+            "label":      data.get("label") or "",
             "attributes": attrs,
         }
 
