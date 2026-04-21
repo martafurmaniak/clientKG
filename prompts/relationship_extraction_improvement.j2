@@ -1,7 +1,12 @@
-Correct relationships in the knowledge graph.
+Correct relationships in the knowledge graph, following the ontology exactly.
 
-RELATIONSHIP ONTOLOGY (only use these types):
-{{ relationship_ontology | tojson(indent=2) }}
+RELATIONSHIP ONTOLOGY — use ONLY these types:
+{% for r in relationship_ontology_rich %}
+  Type       : {{ r.type }}
+  Description: {{ r.description }}
+  From       : {{ r.from | join(" or ") }}  →  To: {{ r.to | join(" or ") }}
+  Attributes : {{ r.attributes | tojson }}
+{% endfor %}
 
 EXISTING KNOWLEDGE GRAPH (use entity IDs from here):
 {{ kg | tojson(indent=2) }}
@@ -15,24 +20,29 @@ JUDGE FEEDBACK — hallucinated relationship IDs to REMOVE:
 DOCUMENT PAGE {{ page_number }}:
 {{ page_text }}
 
-Return:
+Return a JSON object. For each relationship the "attributes" object must contain:
+  - "evidence": a verbatim or paraphrased quote from the document (REQUIRED, never null)
+  - every attribute defined for that relationship type in the ontology above (null if not found)
+  - no other keys
+
 {
   "relationships": [
     {
-      "type": "<ONTOLOGY_TYPE>",
+      "type": "<relationship type from ontology>",
       "source": "<entity id>",
       "target": "<entity id>",
       "attributes": {
-        "evidence": "<short text evidence>",
-        "<attr_name>": "<attr_value or null>"
+        "evidence": "<quote or paraphrase from document>"
       }
     }
   ],
-  "relationships_to_remove": ["<rel_source>_<rel_target>_<rel_type>"]
+  "relationships_to_remove": []
 }
 
-For each relationship:
-- "evidence" is REQUIRED — always include a verbatim or paraphrased quote from the document that supports this relationship. Never leave it empty or null.
-- Include ALL attributes defined for that relationship type in the ontology (see the "attributes" field). Use null for unknown values.
+Rules:
+- Use ONLY ontology-defined relationship types.
+- source/target must match the allowed From/To entity types.
+- Include ONLY the attribute keys defined for the specific relationship type plus "evidence". Do NOT add keys not in the ontology.
+- "evidence" is REQUIRED and must never be null or empty.
 - Do NOT include a "reasoning" field.
-Only include NEW relationships. Do NOT repeat existing correct ones.
+- Only include NEW relationships. Do NOT repeat existing correct ones.

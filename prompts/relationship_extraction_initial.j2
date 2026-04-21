@@ -1,31 +1,41 @@
-Extract relationships from the document page below.
+Extract relationships from the document page below, following the ontology exactly.
 
-RELATIONSHIP ONTOLOGY (only use these relationship types):
-{{ relationship_ontology | tojson(indent=2) }}
+RELATIONSHIP ONTOLOGY — use ONLY these relationship types:
+{% for r in relationship_ontology_rich %}
+  Type       : {{ r.type }}
+  Description: {{ r.description }}
+  From       : {{ r.from | join(" or ") }}  →  To: {{ r.to | join(" or ") }}
+  Attributes : {{ r.attributes | tojson }}
+{% endfor %}
 
-EXTRACTED ENTITIES (use their exact IDs):
+EXTRACTED ENTITIES (use their exact IDs as source/target):
 {{ kg | tojson(indent=2) }}
 
 DOCUMENT PAGE {{ page_number }}:
 {{ page_text }}
 
-Return:
+Return a JSON object. For each relationship the "attributes" object must contain:
+  - "evidence": a verbatim or paraphrased quote from the document (REQUIRED, never null)
+  - every attribute defined for that relationship type in the ontology above (null if not found)
+  - no other keys
+
 {
   "relationships": [
     {
-      "type": "<ONTOLOGY_TYPE>",
+      "type": "<one of the relationship types listed above>",
       "source": "<entity id>",
       "target": "<entity id>",
       "attributes": {
-        "evidence": "<short text evidence>",
-        "<attr_name>": "<attr_value or null>"
+        "evidence": "<quote or paraphrase from document>"
       }
     }
   ],
   "relationships_to_remove": []
 }
 
-For each relationship:
-- "evidence" is REQUIRED — always include a verbatim or paraphrased quote from the document that supports this relationship. Never leave it empty or null.
-- Include ALL attributes defined for that relationship type in the ontology (see the "attributes" field). Use null for unknown values.
+Rules:
+- Use ONLY relationship types defined in the ontology.
+- source must be an entity of an allowed "From" type; target must be an allowed "To" type.
+- Include ONLY the attribute keys defined for the specific relationship type plus "evidence". Do NOT add keys not in the ontology.
+- "evidence" is REQUIRED and must never be null or empty.
 - Do NOT include a "reasoning" field.

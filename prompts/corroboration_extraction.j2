@@ -80,7 +80,7 @@ Return:
 Rules:
 - Use ONLY ontology-defined relationship types.
 - source/target must match the allowed From/To types.
-- Every defined attribute must appear — use null if not found.
+- Include ONLY the attribute keys defined for the specific relationship type plus "evidence". Do NOT add keys not in the ontology.
 - "evidence" is REQUIRED — never leave it empty.
 - Do NOT include a "reasoning" field.
 - You may link history KG entities to new corroboration entities.
