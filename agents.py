@@ -4,18 +4,23 @@ agents.py — all sub-agent implementations.
 All agents use the unified flat KG format throughout:
   entities as a flat list with "type", "label", "attributes" on each entity
   relationships with "source"/"target"/"type"/"attributes"
+
+User prompts are loaded from prompts/ as Jinja2 templates via render().
+System prompts and custom instructions are loaded from agent_config.yaml
+via get_system_prompt() and get_instructions().
 """
 
 from __future__ import annotations
 
 import json
 from llm_utils import call_llm, parse_and_validate
+from prompt_loader import render, get_system_prompt, get_instructions
 from schemas import (
     KnowledgeGraph,
     EntityExtractionResult,
     RelationshipExtractionResult,
     StrayNodeResult,
-    KGCompletenessResult,
+    KGCuratorResult,
     ContradictionResult,
 )
 
@@ -38,6 +43,7 @@ def _j(obj: object) -> str:
 
 def _entity_extraction_agent(
     agent_name: str,
+    agent_key: str,
     entity_types: list[str],
     document_text: str,
     entity_ontology: dict,
@@ -52,99 +58,38 @@ def _entity_extraction_agent(
     Initial run  — extracts all entities of `entity_types` from `document_text`.
     Improvement  — receives existing KG + judge feedback; returns only the
                    delta (new entities to add, IDs to remove).
-
-    custom_instructions — optional free-text appended to the user prompt to
-                          give agent-specific guidance (e.g. disambiguation
-                          rules, edge cases, domain context). Applied in both
-                          initial and improvement runs.
     """
     ontology_subset = {k: v for k, v in entity_ontology.items() if k in entity_types}
     is_improvement  = existing_kg is not None and judge_feedback is not None
 
-    # Existing entities for these types (flat list for the prompt)
     existing_for_types = [
         e.to_dict() for e in existing_kg.entities
         if e.type in entity_types
     ] if existing_kg else []
 
     if is_improvement:
-        relevant_missing = [
-            e for e in judge_feedback.get("missing_entities", [])
-            if e.get("entity_type", "") in entity_types
-        ]
-        relevant_hallucinated = judge_feedback.get("hallucinated_entities", [])
-
-        system_prompt = (
-            "You are a precise knowledge-graph entity correction engine. "
-            "Return ONLY a valid JSON object — no markdown, no explanations."
+        system_prompt = get_system_prompt(agent_key)
+        user_prompt = render(
+            "entity_extraction_improvement.j2",
+            entity_types=entity_types,
+            ontology_subset=ontology_subset,
+            existing_for_types=existing_for_types,
+            relevant_missing=[
+                e for e in judge_feedback.get("missing_entities", [])
+                if e.get("entity_type", "") in entity_types
+            ],
+            relevant_hallucinated=judge_feedback.get("hallucinated_entities", []),
+            page_text=page_text if page_text is not None else document_text,
+            custom_instructions=custom_instructions,
         )
-        user_prompt = f"""Correct the knowledge graph for entity types: {entity_types}.
-
-ENTITY ONTOLOGY:
-{_j(ontology_subset)}
-
-EXISTING ENTITIES IN KG (for these types):
-{_j(existing_for_types)}
-
-JUDGE FEEDBACK — missing entities to ADD:
-{_j(relevant_missing)}
-
-JUDGE FEEDBACK — hallucinated entity IDs to REMOVE:
-{_j(relevant_hallucinated)}
-
-SOURCE TEXT (only the relevant page):
-{page_text if page_text is not None else document_text}
-
-Return a JSON object:
-{{
-  "entities": [
-    {{
-      "id":    "<unique id, must not clash with existing IDs above>",
-      "type":  "<entity type from ontology>",
-      "label": "<short human-readable name>",
-      "attributes": {{
-        "<attr>": "<value or null>"
-      }}
-    }}
-  ],
-  "entities_to_remove": ["<entity_id_to_drop>"]
-}}
-
-Only include NEW entities that need to be added. Do NOT re-list already-correct entities.
-"""
     else:
-        system_prompt = (
-            "You are a precise knowledge-graph entity extraction engine. "
-            "Return ONLY a valid JSON object — no markdown, no explanations. "
-            "Use exactly the entity type keys provided in the ontology."
+        system_prompt = get_system_prompt(agent_key)
+        user_prompt = render(
+            "entity_extraction_initial.j2",
+            ontology_subset=ontology_subset,
+            document_text=document_text,
+            custom_instructions=custom_instructions,
         )
-        user_prompt = f"""Extract all entities of the following types from the document.
-
-ENTITY TYPES AND THEIR ATTRIBUTES (ontology):
-{_j(ontology_subset)}
-
-DOCUMENT:
-{document_text}
-
-Return a JSON object:
-{{
-  "entities": [
-    {{
-      "id":    "<snake_case_type_prefix>_<number>",
-      "type":  "<entity type from ontology>",
-      "label": "<short human-readable name>",
-      "attributes": {{
-        "<attr>": "<value or null>"
-      }}
-    }}
-  ],
-  "entities_to_remove": []
-}}
-"""
-
-    # Append custom instructions to the user prompt if provided
-    if custom_instructions and custom_instructions.strip():
-        user_prompt += f"\n\nADDITIONAL INSTRUCTIONS:\n{custom_instructions.strip()}"
 
     raw    = call_llm(system_prompt, user_prompt, label=agent_name)
     result = parse_and_validate(raw, EntityExtractionResult, label=agent_name)
@@ -190,20 +135,6 @@ def _people_org_types(ontology: dict) -> list:
     return _pick_types(ontology, _PEOPLE_ORG_KW)
 
 
-# ── Per-agent custom instructions ────────────────────────────────────────────
-# Set these strings to add domain-specific guidance to each extraction agent.
-# Applied in both initial and improvement runs. Set to None to disable.
-#
-# Example:
-#   PEOPLE_ORGS_INSTRUCTIONS = """
-#   - Always extract the Client Profile separately from the underlying Person.
-#   - If a person is mentioned only as a counterparty, still extract them.
-#   """
-PEOPLE_ORGS_INSTRUCTIONS: str | None = None
-ASSETS_INSTRUCTIONS:      str | None = None
-TRANSACTIONS_INSTRUCTIONS: str | None = None
-
-
 def people_and_orgs_agent(
     document_text: str,
     entity_ontology: dict,
@@ -216,9 +147,9 @@ def people_and_orgs_agent(
         types = [k for k in entity_ontology
                  if not _matches_any(k, _ASSET_KW) and not _matches_any(k, _TRANSACTION_KW)]
     return _entity_extraction_agent(
-        "PeopleOrgsAgent", types, document_text, entity_ontology,
+        "PeopleOrgsAgent", "people_orgs", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
-        custom_instructions=custom_instructions or PEOPLE_ORGS_INSTRUCTIONS,
+        custom_instructions=custom_instructions or get_instructions("people_orgs"),
     )
 
 
@@ -231,9 +162,9 @@ def assets_agent(
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _ASSET_KW)
     return _entity_extraction_agent(
-        "AssetsAgent", types, document_text, entity_ontology,
+        "AssetsAgent", "assets", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
-        custom_instructions=custom_instructions or ASSETS_INSTRUCTIONS,
+        custom_instructions=custom_instructions or get_instructions("assets"),
     )
 
 
@@ -246,13 +177,14 @@ def transactions_agent(
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _TRANSACTION_KW)
     return _entity_extraction_agent(
-        "TransactionsAgent", types, document_text, entity_ontology,
+        "TransactionsAgent", "transactions", types, document_text, entity_ontology,
         existing_kg, judge_feedback,
-        custom_instructions=custom_instructions or TRANSACTIONS_INSTRUCTIONS,
+        custom_instructions=custom_instructions or get_instructions("transactions"),
     )
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. KG Consolidation agent
+# 2. KG Consolidation agent  (deterministic — no LLM)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def kg_consolidation_agent(
@@ -261,21 +193,57 @@ def kg_consolidation_agent(
     new_relationships: RelationshipExtractionResult | None = None,
     entities_to_remove: list[str] | None = None,
     relationships_to_remove: list[str] | None = None,
+    entities_to_update: list | None = None,
+    relationships_to_update: list | None = None,
 ) -> KnowledgeGraph:
     """
     Pure deterministic merge — no LLM call.
 
-    Operations performed in order:
-      1. Append new entities under their type key (keyed by id, no duplicates).
-      2. Append new relationships (keyed by id, no duplicates).
-      3. Remove entities by ID (+ cascade to any relationship referencing them).
-      4. Remove relationships by ID.
+    Operations in order:
+      1. Apply attribute patches to existing entities (update)
+      2. Apply attribute patches to existing relationships (update)
+      3. Append new entities (dedup by id)
+      4. Append new relationships (dedup by source+target+type)
+      5. Remove entities by ID + cascade to orphaned relationships
     """
-    # Work on copies so we never mutate the caller's objects
     entities:      list = list(existing_kg.entities)
     relationships: list = list(existing_kg.relationships)
 
-    # ── 1. Add new entities (dedup by id) ────────────────────────────────────
+    # ── 1. Update existing entities ──────────────────────────────────────────
+    if entities_to_update:
+        patch_map = {u.entity_id: u.attributes_patch for u in entities_to_update}
+        updated_entities = []
+        for e in entities:
+            if e.id in patch_map:
+                # Overwrite attributes with the complete intended patch
+                updated_entities.append(
+                    e.model_copy(update={"attributes": patch_map[e.id]})
+                )
+                print(f"  [KGConsolidationAgent] updated entity {e.id}")
+            else:
+                updated_entities.append(e)
+        entities = updated_entities
+
+    # ── 2. Update existing relationships ─────────────────────────────────────
+    if relationships_to_update:
+        # Key: (source, target, type)
+        rel_patch_map = {
+            (u.source, u.target, u.type): u.attributes_patch
+            for u in relationships_to_update
+        }
+        updated_rels = []
+        for r in relationships:
+            key = (r.source, r.target, r.type)
+            if key in rel_patch_map:
+                updated_rels.append(
+                    r.model_copy(update={"attributes": rel_patch_map[key]})
+                )
+                print(f"  [KGConsolidationAgent] updated relationship {r.source}→{r.target} [{r.type}]")
+            else:
+                updated_rels.append(r)
+        relationships = updated_rels
+
+    # ── 3. Add new entities (dedup by id) ────────────────────────────────────
     if new_entities:
         existing_ids = {e.id for e in entities}
         for entity in new_entities.entities:
@@ -283,7 +251,7 @@ def kg_consolidation_agent(
                 entities.append(entity)
                 existing_ids.add(entity.id)
 
-    # ── 2. Add new relationships (dedup by source+target+type) ───────────────
+    # ── 4. Add new relationships (dedup by source+target+type) ───────────────
     if new_relationships:
         existing_rel_keys = {(r.source, r.target, r.type) for r in relationships}
         for rel in new_relationships.relationships:
@@ -292,31 +260,23 @@ def kg_consolidation_agent(
                 relationships.append(rel)
                 existing_rel_keys.add(key)
 
-    # ── 3 & 4. Collect all IDs to remove ────────────────────────────────────
+    # ── 5. Collect all IDs to remove ─────────────────────────────────────────
     remove_entity_ids: set[str] = set(entities_to_remove or [])
-    remove_rel_ids:    set[str] = set(relationships_to_remove or [])
     if new_entities:
         remove_entity_ids |= set(new_entities.entities_to_remove)
-    if new_relationships:
-        remove_rel_ids |= set(new_relationships.relationships_to_remove)
 
     if remove_entity_ids:
         entities = [e for e in entities if e.id not in remove_entity_ids]
-        # cascade: drop any relationship that touched a removed entity
         relationships = [
             r for r in relationships
             if r.source not in remove_entity_ids and r.target not in remove_entity_ids
         ]
 
-    if remove_rel_ids:
-        # relationships no longer have an id field — skip if nothing to remove
-        pass
-
     kg = KnowledgeGraph(entities=entities, relationships=relationships)
-
     print(f"  [KGConsolidationAgent] entities={len(kg.entities)}  relationships={len(kg.relationships)}"
-          + (f"  +removed_entities={len(remove_entity_ids)}" if remove_entity_ids else ""))
+          + (f"  removed_e={len(remove_entity_ids)}" if remove_entity_ids else ""))
     return kg
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Relationship extraction agent  (initial + improvement runs)
@@ -328,10 +288,6 @@ def relationship_extraction_agent(
     kg: KnowledgeGraph,
     judge_feedback: dict | None = None,
 ) -> RelationshipExtractionResult:
-    """
-    Extracts relationships page-by-page.
-    In improvement runs, also recommends additions and removals from judge feedback.
-    """
     is_improvement = judge_feedback is not None
     all_relationships: list = []
     all_to_remove:     list[str] = []
@@ -340,85 +296,25 @@ def relationship_extraction_agent(
         label = f"RelationshipAgent[page {page_idx + 1}, {'improvement' if is_improvement else 'initial'}]"
 
         if is_improvement:
-            system_prompt = (
-                "You are a knowledge-graph relationship correction engine. "
-                "Return ONLY a valid JSON object — no markdown, no prose."
+            system_prompt = get_system_prompt("relationship_extraction")
+            user_prompt = render(
+                "relationship_extraction_improvement.j2",
+                relationship_ontology=relationship_ontology,
+                kg=kg.to_serialisable(),
+                missing_relationships=judge_feedback.get("missing_relationships", []),
+                hallucinated_relationships=judge_feedback.get("hallucinated_relationships", []),
+                page_number=page_idx + 1,
+                page_text=page_text,
             )
-            user_prompt = f"""Correct relationships in the knowledge graph.
-
-RELATIONSHIP ONTOLOGY (only use these types):
-{_j(relationship_ontology)}
-
-EXISTING KNOWLEDGE GRAPH (use entity IDs from here):
-{_kg_json(kg)}
-
-JUDGE FEEDBACK — missing relationships to ADD:
-{_j(judge_feedback.get("missing_relationships", []))}
-
-JUDGE FEEDBACK — hallucinated relationship IDs to REMOVE:
-{_j(judge_feedback.get("hallucinated_relationships", []))}
-
-DOCUMENT PAGE {page_idx + 1}:
-{page_text}
-
-Return:
-{{
-  "relationships": [
-    {{
-      "type": "<ONTOLOGY_TYPE>",
-      "source": "<entity id>",
-      "target": "<entity id>",
-      "attributes": {{
-        "evidence": "<short text evidence>",
-        "<attr_name>": "<attr_value or null>"
-      }}
-    }}
-  ],
-  "relationships_to_remove": []
-
-For each relationship:
-- "evidence" is REQUIRED — always include a verbatim or paraphrased quote from the document that supports this relationship. Never leave it empty or null.
-- Include ALL attributes defined for that relationship type in the ontology (see the "attributes" field). Use null for unknown values.
-- Do NOT include a "reasoning" field.
-Only include NEW relationships. Do NOT repeat existing correct ones.
-"""
         else:
-            system_prompt = (
-                "You are a knowledge-graph relationship extraction engine. "
-                "Return ONLY a valid JSON object — no markdown, no prose."
+            system_prompt = get_system_prompt("relationship_extraction")
+            user_prompt = render(
+                "relationship_extraction_initial.j2",
+                relationship_ontology=relationship_ontology,
+                kg=kg.to_serialisable(),
+                page_number=page_idx + 1,
+                page_text=page_text,
             )
-            user_prompt = f"""Extract relationships from the document page below.
-
-RELATIONSHIP ONTOLOGY (only use these relationship types):
-{_j(relationship_ontology)}
-
-EXTRACTED ENTITIES (use their exact IDs):
-{_kg_json(kg)}
-
-DOCUMENT PAGE {page_idx + 1}:
-{page_text}
-
-Return:
-{{
-  "relationships": [
-    {{
-      "type": "<ONTOLOGY_TYPE>",
-      "source": "<entity id>",
-      "target": "<entity id>",
-      "attributes": {{
-        "evidence": "<short text evidence>",
-        "<attr_name>": "<attr_value or null>"
-      }}
-    }}
-  ],
-  "relationships_to_remove": []
-}}
-
-For each relationship:
-- "evidence" is REQUIRED — always include a verbatim or paraphrased quote from the document that supports this relationship. Never leave it empty or null.
-- Include ALL attributes defined for that relationship type in the ontology (see the "attributes" field). Use null for unknown values.
-- Do NOT include a "reasoning" field.
-"""
 
         raw         = call_llm(system_prompt, user_prompt, label=label)
         page_result = parse_and_validate(raw, RelationshipExtractionResult, label=label)
@@ -432,7 +328,6 @@ For each relationship:
         relationships=all_relationships,
         relationships_to_remove=all_to_remove,
     )
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -454,46 +349,16 @@ def stray_node_agent(
 
     print(f"  [StrayNodeAgent] Found {len(stray_ids)} stray node(s): {stray_ids}")
 
-    stray_entities = [
-        e.to_dict()
-        for e in kg.entities
-        if e.id in stray_ids
-    ]
+    stray_entities = [e.to_dict() for e in kg.entities if e.id in stray_ids]
 
-    system_prompt = (
-        "You are a knowledge-graph quality agent. "
-        "Find relationships for stray nodes (entities with no edges). "
-        "Return ONLY a valid JSON object — no markdown, no prose."
+    system_prompt = get_system_prompt("stray_node")
+    user_prompt = render(
+        "stray_node.j2",
+        stray_entities=stray_entities,
+        kg=kg.to_serialisable(),
+        relationship_ontology=relationship_ontology,
+        document_text=document_text,
     )
-    user_prompt = f"""These entities currently have NO relationships in the KG.
-
-STRAY ENTITIES:
-{_j(stray_entities)}
-
-FULL KNOWLEDGE GRAPH:
-{_kg_json(kg)}
-
-RELATIONSHIP ONTOLOGY:
-{_j(relationship_ontology)}
-
-DOCUMENT:
-{document_text}
-
-For each stray entity:
-1. Try to find at least one relationship to another entity in the KG using only ontology types.
-2. If no ontology type fits, add to ontology_gaps.
-
-Return:
-{{
-  "new_relationships": [
-    {{"source": "<entity id>", "target": "<entity id>", "type": "<type>",
-      "attributes": {{"evidence": "<verbatim or paraphrased quote from document>"}}}}
-  ],
-  "ontology_gaps": [
-    {{"entity_id": "<id>", "reasoning": "...", "evidence": "..."}}
-  ]
-}}
-"""
 
     raw    = call_llm(system_prompt, user_prompt, label="StrayNodeAgent")
     result = parse_and_validate(raw, StrayNodeResult, label="StrayNodeAgent")
@@ -505,74 +370,43 @@ Return:
     else:
         print("  [StrayNodeAgent] All stray nodes resolved.")
     return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. KG Completeness judge
+# 5. KG Curator agent
 # ─────────────────────────────────────────────────────────────────────────────
 
-def kg_completeness_judge(
+def kg_curator_agent(
     kg: KnowledgeGraph,
     document_pages: list[str],
-) -> KGCompletenessResult:
+) -> KGCuratorResult:
     """
-    Checks the KG for missing/hallucinated items.
-    Receives the full list of pages so it can tag each missing item with the
-    0-based page_number where the evidence appears.  The orchestrator uses
-    these page numbers to call improvement agents with only the relevant page
-    rather than the full document.
+    Curates the KG against the source document.
+    Returns three action lists: what to add, remove, and update.
     """
-    # Build a numbered page block so the model can reference page indices
     numbered_pages = "\n\n".join(
         f"--- PAGE {i} ---\n{page}" for i, page in enumerate(document_pages)
     )
 
-    system_prompt = (
-        "You are a knowledge-graph completeness judge. "
-        "Compare the KG against the source document. "
-        "Return ONLY a valid JSON object — no markdown, no prose."
+    system_prompt = get_system_prompt("kg_curator")
+    user_prompt = render(
+        "kg_curator.j2",
+        kg=kg.to_serialisable(),
+        numbered_pages=numbered_pages,
     )
-    user_prompt = f"""Review the knowledge graph against the source document.
 
-KNOWLEDGE GRAPH:
-{_kg_json(kg)}
+    raw    = call_llm(system_prompt, user_prompt, label="KGCuratorAgent")
+    result = parse_and_validate(raw, KGCuratorResult, label="KGCuratorAgent")
 
-SOURCE DOCUMENT (pages are numbered starting from 0):
-{numbered_pages}
-
-Return:
-{{
-  "status": "complete" or "needs_improvement",
-  "missing_entities": [
-    {{"entity_type": "<exact ontology type key>", "name": "...",
-      "reasoning": "...", "evidence": "...", "page_number": <0-based int>}}
-  ],
-  "missing_relationships": [
-    {{"type": "<ONTOLOGY_TYPE>", "from": "<name or id>", "to": "<name or id>",
-      "reasoning": "...", "evidence": "...", "page_number": <0-based int>}}
-  ],
-  "hallucinated_entities": [
-    {{"entity_id": "...", "reasoning": "...", "evidence": "..."}}
-  ],
-  "hallucinated_relationships": [
-    {{"rel_id": "...", "reasoning": "...", "evidence": "..."}}
-  ],
-  "reasoning": "Overall assessment."
-}}
-
-Rules:
-- page_number must be the 0-based index of the page where the evidence is found.
-- If evidence spans multiple pages use the page where it first appears.
-- Set status "complete" ONLY when there are zero missing items AND zero hallucinations.
-"""
-
-    raw    = call_llm(system_prompt, user_prompt, label="KGCompletenessJudge")
-    result = parse_and_validate(raw, KGCompletenessResult, label="KGCompletenessJudge")
-
-    print(f"  [KGCompletenessJudge] status={result.status} | "
-          f"missing_e={len(result.missing_entities)} | "
-          f"missing_r={len(result.missing_relationships)} | "
-          f"halluc_e={len(result.hallucinated_entities)} | "
-          f"halluc_r={len(result.hallucinated_relationships)}")
+    print(f"  [KGCuratorAgent] status={result.status} | "
+          f"add_e={len(result.add_entities)} add_r={len(result.add_relationships)} | "
+          f"remove_e={len(result.remove_entities)} remove_r={len(result.remove_relationships)} | "
+          f"update_e={len(result.update_entities)} update_r={len(result.update_relationships)}")
     return result
+
+
+# Backward-compatible alias
+kg_completeness_judge = kg_curator_agent
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -583,35 +417,12 @@ def contradiction_spotting_agent(
     kg: KnowledgeGraph,
     document_text: str,
 ) -> ContradictionResult:
-    system_prompt = (
-        "You are a financial intelligence analyst specialising in client profile consistency. "
-        "Identify contradictions or suspicious inconsistencies. "
-        "Return ONLY a valid JSON object — no markdown, no prose."
+    system_prompt = get_system_prompt("contradiction_spotting")
+    user_prompt = render(
+        "contradiction_spotting.j2",
+        kg=kg.to_serialisable(),
+        document_text=document_text,
     )
-    user_prompt = f"""Analyse the knowledge graph and document for contradictions.
-
-KNOWLEDGE GRAPH:
-{_kg_json(kg)}
-
-SOURCE DOCUMENT:
-{document_text}
-
-Look for:
-- Conflicting attribute values for the same entity
-- Relationships that contradict each other
-- Transactions inconsistent with stated roles or relationships
-- Any other logical inconsistency
-
-Return:
-{{
-  "contradictions": [
-    {{"description": "...", "entities_involved": ["id1", "id2"], "evidence": "..."}}
-  ],
-  "assessment": "Overall summary."
-}}
-
-Return an empty list if no contradictions found.
-"""
 
     raw    = call_llm(system_prompt, user_prompt, label="ContradictionAgent")
     result = parse_and_validate(raw, ContradictionResult, label="ContradictionAgent")

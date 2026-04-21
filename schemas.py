@@ -289,10 +289,11 @@ class StrayNodeResult(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KG Completeness judge output
+# KG Curator agent output
 # ─────────────────────────────────────────────────────────────────────────────
 
-class MissingEntity(BaseModel):
+class AddEntity(BaseModel):
+    """An entity that should be added to the KG."""
     entity_type: str
     name: str
     reasoning: str
@@ -300,7 +301,8 @@ class MissingEntity(BaseModel):
     page_number: Optional[int] = None
 
 
-class MissingRelationship(BaseModel):
+class AddRelationship(BaseModel):
+    """A relationship that should be added to the KG."""
     type: str
     from_: str = Field(alias="from")
     to: str
@@ -316,32 +318,100 @@ class MissingRelationship(BaseModel):
         return str(v).upper().strip()
 
 
-class HallucinatedEntity(BaseModel):
+class RemoveEntity(BaseModel):
+    """An entity that should be removed from the KG (hallucinated or duplicate)."""
     entity_id: str
     reasoning: str
     evidence: Optional[str] = None
+    page_number: Optional[int] = None
 
 
-class HallucinatedRelationship(BaseModel):
-    rel_id: str
+class RemoveRelationship(BaseModel):
+    """A relationship that should be removed from the KG."""
+    source: str
+    target: str
+    type: str
     reasoning: str
     evidence: Optional[str] = None
+    page_number: Optional[int] = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def upper_type(cls, v: Any) -> str:
+        return str(v).upper().strip()
 
 
-class KGCompletenessResult(BaseModel):
+class UpdateEntity(BaseModel):
+    """
+    An entity already in the KG whose attributes need correction or enrichment.
+    attributes_patch contains the COMPLETE intended attribute dict — the
+    consolidation agent will overwrite the entity's attributes entirely.
+    """
+    entity_id: str
+    attributes_patch: dict[str, Any] = Field(default_factory=dict)
+    reasoning: str
+    evidence: Optional[str] = None
+    page_number: Optional[int] = None
+
+
+class UpdateRelationship(BaseModel):
+    """
+    A relationship already in the KG whose attributes need correction or enrichment.
+    attributes_patch contains the COMPLETE intended attribute dict.
+    """
+    source: str
+    target: str
+    type: str
+    attributes_patch: dict[str, Any] = Field(default_factory=dict)
+    reasoning: str
+    evidence: Optional[str] = None
+    page_number: Optional[int] = None
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def upper_type(cls, v: Any) -> str:
+        return str(v).upper().strip()
+
+
+class KGCuratorResult(BaseModel):
+    """
+    Output of the KG Curator agent.
+
+    Replaces the old KGCompletenessResult with three explicit action lists:
+      add    — entities/relationships missing from the KG
+      remove — entities/relationships that are wrong or duplicate
+      update — entities/relationships that exist but need attribute corrections
+    """
     status: Literal["complete", "needs_improvement"] = "needs_improvement"
-    missing_entities: list[MissingEntity] = Field(default_factory=list)
-    missing_relationships: list[MissingRelationship] = Field(default_factory=list)
-    hallucinated_entities: list[HallucinatedEntity] = Field(default_factory=list)
-    hallucinated_relationships: list[HallucinatedRelationship] = Field(default_factory=list)
+
+    # What to add
+    add_entities:      list[AddEntity]      = Field(default_factory=list)
+    add_relationships: list[AddRelationship] = Field(default_factory=list)
+
+    # What to remove
+    remove_entities:      list[RemoveEntity]      = Field(default_factory=list)
+    remove_relationships: list[RemoveRelationship] = Field(default_factory=list)
+
+    # What to update (patch attributes of existing nodes/edges)
+    update_entities:      list[UpdateEntity]      = Field(default_factory=list)
+    update_relationships: list[UpdateRelationship] = Field(default_factory=list)
+
     reasoning: str = ""
 
     @model_validator(mode="after")
-    def derive_status(self) -> "KGCompletenessResult":
-        if any([self.missing_entities, self.missing_relationships,
-                self.hallucinated_entities, self.hallucinated_relationships]):
+    def derive_status(self) -> "KGCuratorResult":
+        has_actions = any([
+            self.add_entities, self.add_relationships,
+            self.remove_entities, self.remove_relationships,
+            self.update_entities, self.update_relationships,
+        ])
+        if has_actions:
             self.status = "needs_improvement"
         return self
+
+
+# Backward-compatible alias
+KGCompletenessResult = KGCuratorResult
 
 
 # ─────────────────────────────────────────────────────────────────────────────

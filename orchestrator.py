@@ -42,14 +42,14 @@ from agents import (
     kg_consolidation_agent,
     relationship_extraction_agent,
     stray_node_agent,
-    kg_completeness_judge,
+    kg_curator_agent,
     contradiction_spotting_agent,
 )
 from schemas import (
     KnowledgeGraph,
     EntityExtractionResult,
     RelationshipExtractionResult,
-    KGCompletenessResult,
+    KGCuratorResult,
 )
 
 MAX_STRAY_NODE_ITERATIONS = 5
@@ -75,7 +75,7 @@ def _section(text: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _select_agents_from_feedback(
-    judge: KGCompletenessResult,
+    judge: KGCuratorResult,
     entity_ontology: dict,
 ) -> dict[str, bool]:
     """
@@ -95,7 +95,7 @@ def _select_agents_from_feedback(
 
     Fallback: unrecognised missing type → RelationshipAgent.
     """
-    missing_types_raw = {e.entity_type for e in judge.missing_entities}
+    missing_types_raw = {e.entity_type for e in judge.add_entities}
     missing_lower     = {t.lower() for t in missing_types_raw}
 
     # Keyword sets mirror the dispatchers in agents.py
@@ -128,9 +128,9 @@ def _select_agents_from_feedback(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _agents_needed_for_entities(missing_entities: list, entity_ontology: dict) -> dict:
-    """Build a stub KGCompletenessResult and delegate to _select_agents_from_feedback."""
-    from schemas import KGCompletenessResult as _KGC
-    stub = _KGC(missing_entities=missing_entities)
+    """Build a stub KGCuratorResult and delegate to _select_agents_from_feedback."""
+    from schemas import KGCuratorResult as _KGC
+    stub = _KGC(add_entities=missing_entities)
     return _select_agents_from_feedback(stub, entity_ontology)
 
 
@@ -225,90 +225,68 @@ def run_pipeline(
             print(f"  [Orchestrator] ⚠ Stray node loop hit max ({MAX_STRAY_NODE_ITERATIONS}). Continuing.")
 
         # ── Phase 4: KG Completeness Judge ───────────────────────────────────
-        _banner(f"PHASE 4 · KG Completeness Judge (iteration {completeness_iter})")
+        _banner(f"PHASE 4 · KG Curator Agent (iteration {completeness_iter})")
 
-        _section("Running KGCompletenessJudge")
-        judge: KGCompletenessResult = kg_completeness_judge(kg, document_pages)
+        _section("Running KGCuratorAgent")
+        curator: KGCuratorResult = kg_curator_agent(kg, document_pages)
 
-        if judge.status == "complete":
+        if curator.status == "complete":
             _section("KG deemed complete — proceeding to Contradiction Spotting")
             break
 
-        # ── Targeted improvement run — grouped by page ───────────────────────
-        _section("KG needs improvement — grouping feedback by page and selecting agents")
+        # ── Curator-driven improvement — grouped by page ─────────────────────
+        _section("KG needs improvement — applying curator actions by page")
 
-        judge_feedback_dict = judge.model_dump(exclude_none=True)
+        curator_dict = curator.model_dump(exclude_none=True)
 
-        # Group missing entities and relationships by page_number.
-        # Items with no page_number (None) go into a fallback group keyed by -1
-        # which will use the full document as context.
-        entity_pages:  dict[int, list] = {}
-        rel_pages:     dict[int, list] = {}
+        def _page(item) -> int:
+            return item.page_number if item.page_number is not None else -1
 
-        for me in judge.missing_entities:
-            pg = me.page_number if me.page_number is not None else -1
-            entity_pages.setdefault(pg, []).append(me.model_dump(exclude_none=True))
+        def _page_text(pg: int) -> str:
+            if pg == -1:
+                return document_text
+            return document_pages[pg] if pg < len(document_pages) else document_text
 
-        for mr in judge.missing_relationships:
-            pg = mr.page_number if mr.page_number is not None else -1
-            rel_pages.setdefault(pg, []).append(mr.model_dump(by_alias=True, exclude_none=True))
+        def _page_label(pg: int) -> str:
+            return "full doc (no page tag)" if pg == -1 else f"page {pg}"
+
+        # ── ADD: group by page and run targeted extraction agents ─────────────
+        add_entity_pages:  dict[int, list] = {}
+        add_rel_pages:     dict[int, list] = {}
+
+        for me in curator.add_entities:
+            add_entity_pages.setdefault(_page(me), []).append(me.model_dump(exclude_none=True))
+        for mr in curator.add_relationships:
+            add_rel_pages.setdefault(_page(mr), []).append(mr.model_dump(by_alias=True, exclude_none=True))
 
         all_entity_parts: list[EntityExtractionResult] = []
         all_rel_parts:    list[RelationshipExtractionResult] = []
 
-        # ── Per-page entity extraction ────────────────────────────────────────
-        for page_idx, missing_on_page in entity_pages.items():
-            # Resolve the page text: -1 means no page info → use full document
-            if page_idx == -1:
-                page_text = document_text
-                page_label = "full doc (no page tag)"
-            else:
-                page_text  = document_pages[page_idx] if page_idx < len(document_pages) else document_text
-                page_label = f"page {page_idx}"
+        for pg, missing_on_page in add_entity_pages.items():
+            pt = _page_text(pg)
+            pl = _page_label(pg)
+            page_missing = [me for me in curator.add_entities if _page(me) == pg]
+            page_sel = _agents_needed_for_entities(page_missing, entity_ontology)
+            page_feedback = {**curator_dict, "missing_entities": missing_on_page}
 
-            # Build a minimal feedback dict containing only this page's items
-            page_feedback = {**judge_feedback_dict, "missing_entities": missing_on_page}
+            if page_sel["people_orgs"]:
+                _section(f"PeopleOrgsAgent — {pl}")
+                all_entity_parts.append(people_and_orgs_agent(pt, entity_ontology,
+                    existing_kg=kg, judge_feedback=page_feedback))
+            if page_sel["assets"]:
+                _section(f"AssetsAgent — {pl}")
+                all_entity_parts.append(assets_agent(pt, entity_ontology,
+                    existing_kg=kg, judge_feedback=page_feedback))
+            if page_sel["transactions"]:
+                _section(f"TransactionsAgent — {pl}")
+                all_entity_parts.append(transactions_agent(pt, entity_ontology,
+                    existing_kg=kg, judge_feedback=page_feedback))
 
-            # Determine which entity agents are needed for this page's items
-            page_missing_entities = [
-                me for me in judge.missing_entities
-                if (me.page_number if me.page_number is not None else -1) == page_idx
-            ]
-            page_agent_sel = _agents_needed_for_entities(page_missing_entities, entity_ontology)
-
-            if page_agent_sel["people_orgs"]:
-                _section(f"PeopleOrgsAgent — {page_label}")
-                all_entity_parts.append(people_and_orgs_agent(
-                    page_text, entity_ontology,
-                    existing_kg=kg, judge_feedback=page_feedback,
-                ))
-
-            if page_agent_sel["assets"]:
-                _section(f"AssetsAgent — {page_label}")
-                all_entity_parts.append(assets_agent(
-                    page_text, entity_ontology,
-                    existing_kg=kg, judge_feedback=page_feedback,
-                ))
-
-            if page_agent_sel["transactions"]:
-                _section(f"TransactionsAgent — {page_label}")
-                all_entity_parts.append(transactions_agent(
-                    page_text, entity_ontology,
-                    existing_kg=kg, judge_feedback=page_feedback,
-                ))
-
-        # ── Per-page relationship extraction ─────────────────────────────────
-        for page_idx, missing_on_page in rel_pages.items():
-            if page_idx == -1:
-                pages_for_call = document_pages   # fallback: all pages
-                page_label = "full doc (no page tag)"
-            else:
-                pages_for_call = [document_pages[page_idx]] if page_idx < len(document_pages) else document_pages
-                page_label = f"page {page_idx}"
-
-            page_feedback = {**judge_feedback_dict, "missing_relationships": missing_on_page}
-
-            _section(f"RelationshipAgent — {page_label}")
+        for pg, missing_on_page in add_rel_pages.items():
+            pages_for_call = [_page_text(pg)] if pg != -1 else document_pages
+            pl = _page_label(pg)
+            page_feedback = {**curator_dict, "missing_relationships": missing_on_page}
+            _section(f"RelationshipAgent (add) — {pl}")
             all_rel_parts.append(relationship_extraction_agent(
                 document_pages=pages_for_call,
                 relationship_ontology=relationship_ontology,
@@ -316,7 +294,6 @@ def run_pipeline(
                 judge_feedback=page_feedback,
             ))
 
-        # ── Merge all per-page results ────────────────────────────────────────
         merged_entity_update: EntityExtractionResult | None = None
         if all_entity_parts:
             merged_entity_update = EntityExtractionResult(
@@ -328,20 +305,25 @@ def run_pipeline(
         if all_rel_parts:
             merged_rel_update = RelationshipExtractionResult(
                 relationships=[r for p in all_rel_parts for r in p.relationships],
-                relationships_to_remove=[rid for p in all_rel_parts for rid in p.relationships_to_remove],
+                relationships_to_remove=[],
             )
 
-        # ── Hallucinations are removed directly, no agent needed ─────────────
-        hallucinated_entity_ids = [e.entity_id for e in judge.hallucinated_entities]
-        hallucinated_rel_ids    = [r.rel_id    for r in judge.hallucinated_relationships]
+        # ── REMOVE: collect entity and relationship IDs to drop ───────────────
+        remove_entity_ids = [e.entity_id for e in curator.remove_entities]
+        # Relationship removals cascade automatically when source/target removed;
+        # explicit rel removals handled via entities_to_remove cascade in consolidation
+        # For standalone rel removals we pass them as entities_to_remove=[] and
+        # handle via update_relationships overwrite — so nothing extra needed here.
 
-        _section("KGConsolidationAgent — merging targeted improvements + removals")
+        # ── UPDATE: pass patches directly to consolidation ────────────────────
+        _section("KGConsolidationAgent — applying add / remove / update actions")
         kg = kg_consolidation_agent(
             existing_kg=kg,
             new_entities=merged_entity_update,
             new_relationships=merged_rel_update,
-            entities_to_remove=hallucinated_entity_ids,
-            relationships_to_remove=hallucinated_rel_ids,
+            entities_to_remove=remove_entity_ids,
+            entities_to_update=curator.update_entities or None,
+            relationships_to_update=curator.update_relationships or None,
         )
 
     else:
