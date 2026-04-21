@@ -243,8 +243,16 @@ def run_corroboration_phase(
     relationship_ontology: dict,
 ) -> dict[str, KnowledgeGraph]:
     """
-    Process all corroboration documents.
-    Saves each KG to its output_path and returns a dict of source_file → KG.
+    Process all corroboration documents in order.
+
+    A cumulative_kg is maintained across documents: it starts as the client
+    history KG and grows with every new entity discovered in each document.
+    This ensures that entities found in document N are available as known
+    entities when processing document N+1, preventing re-extraction with
+    new IDs.
+
+    Each document KG is still saved independently (self-contained with all
+    its own entities), but the shared entity pool grows across documents.
     """
     if not docs:
         print("  [CorrPhase] No corroboration documents to process.")
@@ -252,10 +260,13 @@ def run_corroboration_phase(
 
     results: dict[str, KnowledgeGraph] = {}
 
+    # Starts as the client history KG; accumulates new entities from each doc
+    cumulative_kg = history_kg
+
     for doc in docs:
         doc_kg = run_corroboration_document(
             doc=doc,
-            history_kg=history_kg,
+            history_kg=cumulative_kg,   # includes all previously seen entities
             entity_ontology=entity_ontology,
             relationship_ontology=relationship_ontology,
         )
@@ -267,5 +278,18 @@ def run_corroboration_phase(
         )
         print(f"  [CorrPhase] Saved → {doc.output_path}")
         results[doc.source_file] = doc_kg
+
+        # Grow the cumulative entity pool with any new entities from this doc.
+        # Dedup by ID — existing entities are never overwritten.
+        existing_ids = {e.id for e in cumulative_kg.entities}
+        new_entities  = [e for e in doc_kg.entities if e.id not in existing_ids]
+        if new_entities:
+            cumulative_kg = KnowledgeGraph(
+                entities=cumulative_kg.entities + new_entities,
+                relationships=cumulative_kg.relationships,
+            )
+            print(f"  [CorrPhase] Cumulative entity pool: "
+                  f"{len(cumulative_kg.entities)} entities "
+                  f"(+{len(new_entities)} new from {doc.source_file})")
 
     return results
