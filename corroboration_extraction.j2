@@ -1,0 +1,100 @@
+{% if extraction_target == "entities" %}
+Extract entities from the corroboration document page, following the ontology exactly.
+
+ENTITY ONTOLOGY:
+{% for e in entity_ontology_rich %}
+  Type        : {{ e.type }}
+  Description : {{ e.description }}
+  Next ID     : {{ e.next_id }}  ← use this for the first new {{ e.type }}, then increment
+  label       : write a short human-readable summary of this entity (e.g. "John Smith", "Alpine Bank savings account", "CHF 50k transfer to GlobalTech")
+  Attributes  : {{ e.attributes | tojson }}
+{% endfor %}
+
+ENTITIES ALREADY IN THE GRAPH — do NOT create new nodes for these; use their existing IDs:
+{{ known_entities | tojson(indent=2) }}
+
+MATCHING RULE: Before extracting a new entity, check if any entity in the list above
+matches by name, alias, or description. If it matches — even partially or under a
+slightly different spelling — use the existing entity's ID in the relationship step
+instead of creating a new node.
+
+DOCUMENT SUMMARY:
+{{ document_summary }}
+
+PAGE {{ page_number }} SUMMARY:
+{{ page_summary }}
+
+Return ONLY entities NOT already in the graph above:
+
+{
+  "entities": [
+    {
+      "id": "<next_id for this type — must not clash with any existing ID above>",
+      "type": "<entity type from ontology>",
+      "label": "<concise human-readable description of this entity>",
+      "attributes": {
+        "<every attribute for this type>": "<value or null>"
+      }
+    }
+  ],
+  "entities_to_remove": []
+}
+
+Rules:
+- Use ONLY ontology-defined types and attributes.
+- "label" must be a concise human-readable description of the entity. Do NOT copy an attribute value verbatim.
+- Every attribute must appear — use null if not found.
+- Do not invent values.
+
+{% else %}
+Extract relationships from the corroboration document page, following the ontology exactly.
+
+RELATIONSHIP ONTOLOGY:
+{% for r in relationship_ontology_rich %}
+  Type       : {{ r.type }}
+  Description: {{ r.description }}
+  From       : {{ r.from | join(" or ") }}  →  To: {{ r.to | join(" or ") }}
+  Attributes : {{ r.attributes | tojson }}
+{% endfor %}
+
+ALL AVAILABLE ENTITIES (use their exact IDs as source/target):
+{{ known_entities | tojson(indent=2) }}
+
+DOCUMENT SUMMARY:
+{{ document_summary }}
+
+PAGE {{ page_number }} SUMMARY:
+{{ page_summary }}
+
+For EACH relationship type, the required output structure is shown below.
+Return only relationship types that are supported by evidence in the document.
+
+{% for r in relationship_ontology_rich %}
+{{ r.type }}:
+  {
+    "type": "{{ r.type }}",
+    "source": "<id of a {{ r.from | join(' or ') }} entity>",
+    "target": "<id of a {{ r.to | join(' or ') }} entity>",
+    "attributes": {
+      "evidence": "<verbatim or paraphrased quote from document>",
+      {% if r.attributes is mapping %}{% for attr in r.attributes.keys() %}"{{ attr }}": "<value or null>"{% if not loop.last %},
+      {% endif %}{% endfor %}{% endif %}
+
+    }
+  }
+{% endfor %}
+
+Return:
+{
+  "relationships": [ ... one object per relationship found, using the exact structure above ... ],
+  "relationships_to_remove": []
+}
+
+Rules:
+- Use ONLY ontology-defined relationship types.
+- source/target must match the allowed From/To types.
+- Include ONLY the attribute keys defined for the specific relationship type plus "evidence". Do NOT add keys not in the ontology.
+- "evidence" is REQUIRED — never leave it empty.
+- Do NOT include a "reasoning" field.
+- You may link history KG entities to new corroboration entities.
+{% endif %}

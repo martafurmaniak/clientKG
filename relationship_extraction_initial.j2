@@ -1,0 +1,49 @@
+Extract relationships from the document page below, following the ontology exactly.
+
+RELATIONSHIP ONTOLOGY — use ONLY these relationship types:
+{% for r in relationship_ontology_rich %}
+  Type       : {{ r.type }}
+  Description: {{ r.description }}
+  From       : {{ r.from | join(" or ") }}  →  To: {{ r.to | join(" or ") }}
+  Attributes : {{ r.attributes | tojson }}
+{% endfor %}
+
+ENTITY INDEX — all available entities across ALL pages (use these IDs as source/target even if the entity appeared on a different page):
+{{ entity_index | tojson(indent=2) }}
+
+FULL KG (for context):
+{{ kg | tojson(indent=2) }}
+
+DOCUMENT PAGE {{ page_number }}:
+{{ page_text }}
+
+For EACH relationship type, the required output structure is shown below.
+Return only relationship types that are supported by evidence in the document.
+
+{% for r in relationship_ontology_rich %}
+{{ r.type }}:
+  {
+    "type": "{{ r.type }}",
+    "source": "<id of a {{ r.from | join(' or ') }} entity>",
+    "target": "<id of a {{ r.to | join(' or ') }} entity>",
+    "attributes": {
+      "evidence": "<verbatim or paraphrased quote from document>",
+      {% if r.attributes is mapping %}{% for attr in r.attributes.keys() %}"{{ attr }}": "<value or null>"{% if not loop.last %},
+      {% endif %}{% endfor %}{% endif %}
+
+    }
+  }
+{% endfor %}
+
+Return:
+{
+  "relationships": [ ... one object per relationship found, using the exact structure above ... ],
+  "relationships_to_remove": []
+}
+
+Rules:
+- Use ONLY relationship types defined in the ontology.
+- source must be an entity of an allowed "From" type; target must be an allowed "To" type.
+- Include ONLY the attribute keys defined for the specific relationship type plus "evidence". Do NOT add keys not in the ontology.
+- "evidence" is REQUIRED and must never be null or empty.
+- Do NOT include a "reasoning" field.
