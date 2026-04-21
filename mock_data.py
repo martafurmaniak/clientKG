@@ -80,3 +80,74 @@ RELATIONSHIP_ONTOLOGY = {
         "to": ["organisations"]
     }
 }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mock corroboration documents
+# ─────────────────────────────────────────────────────────────────────────────
+# Two small summarized documents used when RUN_MODE = "mock".
+# Structure mirrors the real *_summarized.json format.
+
+MOCK_CORROBORATION_DOCS = [
+    {
+        "pages": [
+            {
+                "page_number": 0,
+                "offset": 0,
+                "page_text": "Bank statement for ACC-001. Period: Jan-Mar 2024. Holder: John Smith.",
+                "page_summary": (
+                    "Bank statement for savings account ACC-001 held by John Smith at Alpine Bank. "
+                    "Period January to March 2024. Opening balance CHF 260,000. "
+                    "Debit of CHF 50,000 on 12 March 2024 to GlobalTech Ltd reference CONSULTING. "
+                    "Credit of CHF 10,000 on 15 March 2024 from Robert Brown reference GIFT. "
+                    "Closing balance CHF 220,000."
+                ),
+            },
+            {
+                "page_number": 1,
+                "offset": 0,
+                "page_text": "Account holder details and signatures.",
+                "page_summary": (
+                    "Account holder: John Smith, date of birth 1979-04-03, passport CH-9982211. "
+                    "Joint holder: Sarah Smith, date of birth 1981-11-17. "
+                    "Both holders provided wet signatures on 5 January 2020."
+                ),
+            },
+        ],
+        "document_summary": (
+            "Alpine Bank statement for account ACC-001 (savings) covering Q1 2024. "
+            "Account held by John Smith with Sarah Smith as joint holder. "
+            "Two notable transactions: CHF 50,000 outgoing to GlobalTech Ltd "
+            "and CHF 10,000 incoming from Robert Brown."
+        ),
+        "meta": {
+            "summarized_at": "2024-04-01T10:00:00Z",
+            "source_file": "alpine_bank_statement_q1_2024.pdf",
+        },
+    },
+    {
+        "pages": [
+            {
+                "page_number": 0,
+                "offset": 0,
+                "page_text": "Commercial register extract for TechVentures AG.",
+                "page_summary": (
+                    "Commercial register extract for TechVentures AG, CHE-123.456.789. "
+                    "Registered address: Bahnhofstrasse 10, 8001 Zurich. "
+                    "Founded 15 March 2015. Share capital CHF 100,000. "
+                    "CEO and sole director: John Smith, born 1979-04-03. "
+                    "The company develops enterprise software for financial institutions."
+                ),
+            },
+        ],
+        "document_summary": (
+            "Official Swiss commercial register extract for TechVentures AG confirming "
+            "John Smith as CEO and sole director, company registration number CHE-123.456.789, "
+            "founded 2015 in Zurich."
+        ),
+        "meta": {
+            "summarized_at": "2024-04-01T10:05:00Z",
+            "source_file": "techventures_commercial_register.pdf",
+        },
+    },
+]

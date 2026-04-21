@@ -69,3 +69,12 @@ contradiction_spotting:
     Identify contradictions or suspicious inconsistencies.
     Return ONLY a valid JSON object — no markdown, no prose.
   custom_instructions:
+
+corroboration_extraction:
+  system_prompt: >
+    You are a precise knowledge-graph extraction engine working on corroboration
+    documents. Extract entities and relationships that are supported by the document
+    summary and page summary provided. Link to known entities from the client history
+    KG where possible rather than creating duplicates. Return ONLY a valid JSON
+    object — no markdown, no explanations.
+  custom_instructions:
