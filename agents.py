@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from llm_utils import call_llm, parse_and_validate
-from prompt_loader import render, get_system_prompt, get_instructions
+from prompt_loader import render, render_with_ontology, get_system_prompt, get_instructions
 from schemas import (
     KnowledgeGraph,
     EntityExtractionResult,
@@ -69,8 +69,11 @@ def _entity_extraction_agent(
 
     if is_improvement:
         system_prompt = get_system_prompt(agent_key)
-        user_prompt = render(
+        user_prompt = render_with_ontology(
             "entity_extraction_improvement.j2",
+            entity_ontology=ontology_subset,
+            relationship_ontology={},
+            existing_kg=existing_kg,
             entity_types=entity_types,
             ontology_subset=ontology_subset,
             existing_for_types=existing_for_types,
@@ -84,8 +87,11 @@ def _entity_extraction_agent(
         )
     else:
         system_prompt = get_system_prompt(agent_key)
-        user_prompt = render(
+        user_prompt = render_with_ontology(
             "entity_extraction_initial.j2",
+            entity_ontology=ontology_subset,
+            relationship_ontology={},
+            existing_kg=existing_kg,   # None on first call → starts from prefix+1
             ontology_subset=ontology_subset,
             document_text=document_text,
             custom_instructions=custom_instructions,
@@ -297,9 +303,11 @@ def relationship_extraction_agent(
 
         if is_improvement:
             system_prompt = get_system_prompt("relationship_extraction")
-            user_prompt = render(
+            user_prompt = render_with_ontology(
                 "relationship_extraction_improvement.j2",
+                entity_ontology={},
                 relationship_ontology=relationship_ontology,
+                existing_kg=kg,
                 kg=kg.to_serialisable(),
                 missing_relationships=judge_feedback.get("missing_relationships", []),
                 hallucinated_relationships=judge_feedback.get("hallucinated_relationships", []),
@@ -308,9 +316,11 @@ def relationship_extraction_agent(
             )
         else:
             system_prompt = get_system_prompt("relationship_extraction")
-            user_prompt = render(
+            user_prompt = render_with_ontology(
                 "relationship_extraction_initial.j2",
+                entity_ontology={},
                 relationship_ontology=relationship_ontology,
+                existing_kg=kg,
                 kg=kg.to_serialisable(),
                 page_number=page_idx + 1,
                 page_text=page_text,
@@ -379,18 +389,24 @@ def stray_node_agent(
 def kg_curator_agent(
     kg: KnowledgeGraph,
     document_pages: list[str],
+    entity_ontology: dict | None = None,
+    relationship_ontology: dict | None = None,
 ) -> KGCuratorResult:
     """
     Curates the KG against the source document.
     Returns three action lists: what to add, remove, and update.
+    Accepts optional ontology dicts so the curator can enforce schema compliance.
     """
     numbered_pages = "\n\n".join(
         f"--- PAGE {i} ---\n{page}" for i, page in enumerate(document_pages)
     )
 
     system_prompt = get_system_prompt("kg_curator")
-    user_prompt = render(
+    user_prompt = render_with_ontology(
         "kg_curator.j2",
+        entity_ontology=entity_ontology or {},
+        relationship_ontology=relationship_ontology or {},
+        existing_kg=kg,
         kg=kg.to_serialisable(),
         numbered_pages=numbered_pages,
     )

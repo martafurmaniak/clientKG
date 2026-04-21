@@ -23,7 +23,7 @@ from pathlib import Path
 from schemas import KnowledgeGraph, EntityExtractionResult, RelationshipExtractionResult
 from agents import kg_consolidation_agent
 from llm_utils import call_llm, parse_and_validate
-from prompt_loader import render, get_system_prompt
+from prompt_loader import render_with_ontology, get_system_prompt
 from kg_refinement_loop import run_refinement_loop
 from corroboration_loader import CorroborationDoc
 
@@ -49,9 +49,10 @@ def _extract_page(
     page_summary = page.get("page_summary", page.get("page_text", ""))
     page_number  = page.get("page_number", page_idx)
 
-    # Slim reference list: id + type + label only (no full attributes)
+    # Full entity list: pass complete attributes so the model can match on content
+    # and reuse the exact same IDs from the history KG
     known_entities = [
-        {"id": e.id, "type": e.type, "label": e.label}
+        e.to_dict()
         for e in (history_kg.entities + doc_kg_so_far.entities)
     ]
 
@@ -59,12 +60,13 @@ def _extract_page(
     system_prompt = get_system_prompt("corroboration_extraction")
 
     # ── Entity extraction ─────────────────────────────────────────────────────
-    ent_user = render(
+    ent_user = render_with_ontology(
         "corroboration_extraction.j2",
-        page_summary=page_summary,
-        document_summary=document_summary,
         entity_ontology=entity_ontology,
         relationship_ontology=relationship_ontology,
+        existing_kg=doc_kg_so_far,
+        page_summary=page_summary,
+        document_summary=document_summary,
         known_entities=known_entities,
         extraction_target="entities",
         page_number=page_number,
@@ -77,12 +79,13 @@ def _extract_page(
         entities=doc_kg_so_far.entities + ent_result.entities,
         relationships=doc_kg_so_far.relationships,
     )
-    rel_user = render(
+    rel_user = render_with_ontology(
         "corroboration_extraction.j2",
-        page_summary=page_summary,
-        document_summary=document_summary,
         entity_ontology=entity_ontology,
         relationship_ontology=relationship_ontology,
+        existing_kg=combined_for_rels,
+        page_summary=page_summary,
+        document_summary=document_summary,
         known_entities=combined_for_rels.to_serialisable()["entities"],
         extraction_target="relationships",
         page_number=page_number,
