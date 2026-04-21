@@ -1,23 +1,23 @@
 """
 kg_refinement_loop.py — shared KG refinement loop.
 
-Contains the stray-node feedback loop and KG curator loop that are run
-after initial extraction — whether from a client history document or a
-corroboration document.
+Improvements in this version
+─────────────────────────────
+Fix 1  : Curator runs BEFORE stray-node check. Clean the graph first,
+         then verify connectivity. Prevents wasting stray-node calls on
+         nodes the curator was about to remove.
 
-Both pipelines call run_refinement_loop() with their KG and document
-context.  All logic lives here once; neither pipeline duplicates it.
+Fix 4  : Distinguish "missing entity" (full extraction) vs "incomplete entity"
+         (attribute patch only). update_entities from the curator go directly to
+         consolidation without re-running an extraction agent.
 
-Interface
-─────────
-run_refinement_loop(
-    kg,
-    document_text,        # full concatenated plain text (for stray-node agent)
-    document_pages,       # list of page strings (for curator + improvement agents)
-    entity_ontology,
-    relationship_ontology,
-    label,                # short string prefix for console output e.g. "ClientHistory"
-) -> RefinementResult(kg, ontology_gap_report)
+Fix 5  : _agents_needed_for_entities / _select_agents_from_feedback simplified
+         into a single clean function with no stub-object workaround.
+
+Fix 9  : Early exit if a curator iteration produced zero net change to the KG
+         (entity + relationship count delta == 0 and no removals/updates).
+
+Fix 10 : curator.remove_relationships now correctly passed to consolidation.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from schemas import (
     KGCuratorResult,
 )
 
-MAX_STRAY_NODE_ITERATIONS  = 5
+MAX_STRAY_NODE_ITERATIONS   = 5
 MAX_COMPLETENESS_ITERATIONS = 3
 
 
@@ -69,44 +69,51 @@ def _section(text: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Agent selection helpers
+# Fix 5: simplified agent selection
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _select_agents_from_feedback(
-    curator: KGCuratorResult,
-    entity_ontology: dict,
-) -> dict[str, bool]:
-    """Map curator add_entities to the specific agents that should handle them."""
-    missing_types_raw = {e.entity_type for e in curator.add_entities}
-    missing_lower     = {t.lower() for t in missing_types_raw}
+_PEOPLE_ORG_KW  = frozenset({"person", "people", "org", "organisation",
+                               "organization", "company", "compan", "bank"})
+_ASSET_KW       = frozenset({"asset", "account", "holding"})
+_TRANSACTION_KW = frozenset({"transaction", "transfer", "payment",
+                               "corporate", "event"})
 
-    PEOPLE_ORG_KW  = {"person", "people", "org", "organisation", "organization", "company", "compan", "bank"}
-    ASSET_KW       = {"asset", "account", "holding"}
-    TRANSACTION_KW = {"transaction", "transfer", "payment", "corporate", "event"}
 
-    def _matches(kw_set: set[str]) -> bool:
+def _select_agents(missing_entities: list, missing_relationships: list) -> dict[str, bool]:
+    """
+    Given lists of AddEntity and AddRelationship items from the curator,
+    return which extraction agents need to run.
+    No stub objects, no intermediate helpers.
+    """
+    missing_lower = {e.entity_type.lower() for e in missing_entities}
+
+    def _hits(kw_set: frozenset) -> bool:
         return any(any(kw in t for kw in kw_set) for t in missing_lower)
 
     selection = {
-        "people_orgs":   _matches(PEOPLE_ORG_KW),
-        "assets":        _matches(ASSET_KW),
-        "transactions":  _matches(TRANSACTION_KW),
-        "relationships": bool(curator.add_relationships),
+        "people_orgs":   _hits(_PEOPLE_ORG_KW),
+        "assets":        _hits(_ASSET_KW),
+        "transactions":  _hits(_TRANSACTION_KW),
+        "relationships": bool(missing_relationships),
     }
 
-    if not any(selection.values()):
-        print("  [Refinement] Could not map missing types to specific agents "
-              f"({missing_types_raw}) — defaulting to RelationshipAgent.")
+    if missing_entities and not any(selection.values()):
+        print("  [Refinement] Could not map missing types to agents "
+              f"({[e.entity_type for e in missing_entities]}) — defaulting to RelationshipAgent.")
         selection["relationships"] = True
 
     chosen = [k for k, v in selection.items() if v]
-    print(f"  [Refinement] Agents selected for improvement run: {chosen}")
+    print(f"  [Refinement] Agents selected: {chosen}")
     return selection
 
 
-def _agents_needed_for_entities(missing_entities: list, entity_ontology: dict) -> dict:
-    stub = KGCuratorResult(add_entities=missing_entities)
-    return _select_agents_from_feedback(stub, entity_ontology)
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix 9: change detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _kg_signature(kg: KnowledgeGraph) -> tuple[int, int]:
+    """Return (entity_count, relationship_count) for change detection."""
+    return len(kg.entities), len(kg.relationships)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,21 +129,13 @@ def run_refinement_loop(
     label: str = "",
 ) -> RefinementResult:
     """
-    Run the stray-node feedback loop and KG curator loop on an already-extracted KG.
+    Run the curator loop followed by stray-node check on an already-extracted KG.
 
-    Parameters
-    ──────────
-    kg                    : the KG produced by initial extraction
-    document_text         : full concatenated plain text — used by stray-node agent
-    document_pages        : per-page strings — used by curator + improvement agents
-    entity_ontology       : shared ontology dict
-    relationship_ontology : shared ontology dict
-    label                 : short string shown in console banners e.g. "ClientHistory"
-                            or "BankStatement"
+    Order per iteration (Fix 1):
+      1. KG Curator — clean, add, remove, update
+      2. Stray node check — verify all nodes are connected
 
-    Returns
-    ───────
-    RefinementResult with the refined KG and an ontology_gap_report dict.
+    Early exit (Fix 9) if a curator iteration produces zero net change.
     """
     prefix = f"[{label}] " if label else ""
     all_ontology_gaps: list[dict] = []
@@ -154,57 +153,46 @@ def run_refinement_loop(
 
     for completeness_iter in range(1, MAX_COMPLETENESS_ITERATIONS + 1):
 
-        # ── Stray Node Feedback Loop ──────────────────────────────────────────
-        _banner(f"{prefix}Stray Node Detection (iteration {completeness_iter})")
+        sig_before = _kg_signature(kg)
 
-        for stray_iter in range(1, MAX_STRAY_NODE_ITERATIONS + 1):
-            _section(f"StrayNodeAgent — iteration {stray_iter}")
-            stray = stray_node_agent(kg, relationship_ontology, document_text)
+        # ── Fix 1: Curator runs FIRST ─────────────────────────────────────────
+        _banner(f"{prefix}KG Curator Agent (iteration {completeness_iter})")
+        _section("Running KGCuratorAgent")
 
-            if stray.status == "ontology_gap":
-                gaps = [g.model_dump(exclude_none=True) for g in stray.ontology_gaps]
-                all_ontology_gaps.extend(gaps)
-                print(f"  {prefix}Ontology gap(s) recorded ({len(gaps)} new, "
-                      f"{len(all_ontology_gaps)} total) — continuing.")
-                if stray.new_relationships:
+        curator: KGCuratorResult = kg_curator_agent(
+            kg, document_pages,
+            entity_ontology=entity_ontology,
+            relationship_ontology=relationship_ontology,
+        )
+
+        if curator.status == "complete":
+            _section("KG deemed complete — running final stray-node check")
+            # Still run one stray-node pass to catch any connectivity issues
+            # before declaring the graph done
+            _final_stray = stray_node_agent(kg, relationship_ontology, document_text)
+            if _final_stray.status != "clean":
+                if _final_stray.new_relationships:
                     kg = kg_consolidation_agent(
                         existing_kg=kg,
                         new_relationships=RelationshipExtractionResult(
-                            relationships=stray.new_relationships
+                            relationships=_final_stray.new_relationships
                         ),
                     )
-                break
-
-            if stray.status == "clean":
-                _section("All nodes connected — proceeding to KG Curator")
-                break
-
-            _section("KGConsolidationAgent — adding resolved stray-node relationships")
-            kg = kg_consolidation_agent(
-                existing_kg=kg,
-                new_relationships=RelationshipExtractionResult(
-                    relationships=stray.new_relationships
-                ),
-            )
-        else:
-            print(f"  {prefix}⚠ Stray node loop hit max ({MAX_STRAY_NODE_ITERATIONS}).")
-
-        # ── KG Curator Loop ───────────────────────────────────────────────────
-        _banner(f"{prefix}KG Curator Agent (iteration {completeness_iter})")
-
-        _section("Running KGCuratorAgent")
-        curator: KGCuratorResult = kg_curator_agent(kg, document_pages)
-
-        if curator.status == "complete":
-            _section("KG deemed complete")
+                if _final_stray.ontology_gaps:
+                    all_ontology_gaps.extend(
+                        g.model_dump(exclude_none=True)
+                        for g in _final_stray.ontology_gaps
+                    )
             break
 
-        # ── ADD: group by page, run targeted extraction agents ────────────────
+        # ── Apply curator actions ─────────────────────────────────────────────
         _section("KG needs improvement — applying curator actions by page")
         curator_dict = curator.model_dump(exclude_none=True)
 
-        add_entity_pages: dict[int, list] = {}
-        add_rel_pages:    dict[int, list] = {}
+        # Fix 4: route update_entities directly to consolidation — no agent call needed
+        # Only "add" items require an extraction agent re-run
+        add_entity_pages:  dict[int, list] = {}
+        add_rel_pages:     dict[int, list] = {}
 
         for me in curator.add_entities:
             add_entity_pages.setdefault(_page(me), []).append(me.model_dump(exclude_none=True))
@@ -216,32 +204,35 @@ def run_refinement_loop(
         all_entity_parts: list[EntityExtractionResult] = []
         all_rel_parts:    list[RelationshipExtractionResult] = []
 
+        # Entity additions — grouped by page
         for pg, missing_on_page in add_entity_pages.items():
             pt = _page_text(pg)
             pl = _page_label(pg)
+            # Fix 5: direct call to simplified agent selector
             page_missing = [me for me in curator.add_entities if _page(me) == pg]
-            page_sel     = _agents_needed_for_entities(page_missing, entity_ontology)
+            sel = _select_agents(page_missing, [])
             page_feedback = {**curator_dict, "missing_entities": missing_on_page}
 
-            if page_sel["people_orgs"]:
+            if sel["people_orgs"]:
                 _section(f"PeopleOrgsAgent — {pl}")
                 all_entity_parts.append(
                     people_and_orgs_agent(pt, entity_ontology,
                                           existing_kg=kg, judge_feedback=page_feedback)
                 )
-            if page_sel["assets"]:
+            if sel["assets"]:
                 _section(f"AssetsAgent — {pl}")
                 all_entity_parts.append(
                     assets_agent(pt, entity_ontology,
                                  existing_kg=kg, judge_feedback=page_feedback)
                 )
-            if page_sel["transactions"]:
+            if sel["transactions"]:
                 _section(f"TransactionsAgent — {pl}")
                 all_entity_parts.append(
                     transactions_agent(pt, entity_ontology,
                                        existing_kg=kg, judge_feedback=page_feedback)
                 )
 
+        # Relationship additions — grouped by page
         for pg, missing_on_page in add_rel_pages.items():
             pages_for_call = [_page_text(pg)] if pg != -1 else document_pages
             pl = _page_label(pg)
@@ -268,21 +259,73 @@ def run_refinement_loop(
                 relationships_to_remove=[],
             )
 
+        # Fix 10: pass remove_relationships to consolidation
         remove_entity_ids = [e.entity_id for e in curator.remove_entities]
+        remove_rel_keys   = [
+            (r.source, r.target, r.type) for r in curator.remove_relationships
+        ]
 
-        _section("KGConsolidationAgent — applying add / remove / update actions")
+        _section("KGConsolidationAgent — applying add / remove / update (Fix 4 + Fix 10)")
         kg = kg_consolidation_agent(
             existing_kg=kg,
             new_entities=merged_entity_update,
             new_relationships=merged_rel_update,
             entities_to_remove=remove_entity_ids,
+            # Fix 10: relationship removals by (source, target, type) key
+            relationship_keys_to_remove=remove_rel_keys if remove_rel_keys else None,
+            # Fix 4: update_entities go straight to consolidation, no agent re-run
             entities_to_update=curator.update_entities or None,
             relationships_to_update=curator.update_relationships or None,
         )
 
+        # ── Fix 9: early exit if no net change ───────────────────────────────
+        sig_after = _kg_signature(kg)
+        had_removals = bool(remove_entity_ids or remove_rel_keys)
+        had_updates  = bool(curator.update_entities or curator.update_relationships)
+        if sig_after == sig_before and not had_removals and not had_updates:
+            print(f"  {prefix}No net change in iteration {completeness_iter} — "
+                  "exiting curator loop early.")
+            break
+
+        # ── Stray node check AFTER curator (Fix 1) ────────────────────────────
+        _banner(f"{prefix}Stray Node Check (after curator iteration {completeness_iter})")
+
+        for stray_iter in range(1, MAX_STRAY_NODE_ITERATIONS + 1):
+            _section(f"StrayNodeAgent — iteration {stray_iter}")
+            stray = stray_node_agent(kg, relationship_ontology, document_text)
+
+            if stray.status == "ontology_gap":
+                gaps = [g.model_dump(exclude_none=True) for g in stray.ontology_gaps]
+                all_ontology_gaps.extend(gaps)
+                print(f"  {prefix}Ontology gap(s) recorded ({len(gaps)} new, "
+                      f"{len(all_ontology_gaps)} total) — continuing.")
+                if stray.new_relationships:
+                    kg = kg_consolidation_agent(
+                        existing_kg=kg,
+                        new_relationships=RelationshipExtractionResult(
+                            relationships=stray.new_relationships
+                        ),
+                    )
+                break
+
+            if stray.status == "clean":
+                _section("All nodes connected")
+                break
+
+            _section("KGConsolidationAgent — adding resolved stray-node relationships")
+            kg = kg_consolidation_agent(
+                existing_kg=kg,
+                new_relationships=RelationshipExtractionResult(
+                    relationships=stray.new_relationships
+                ),
+            )
+        else:
+            print(f"  {prefix}⚠ Stray node loop hit max ({MAX_STRAY_NODE_ITERATIONS}).")
+
     else:
         print(f"  {prefix}⚠ Curator loop hit max ({MAX_COMPLETENESS_ITERATIONS}). Proceeding.")
 
+    # Final stray-node pass if loop exited via max iterations
     gap_report = {
         "total_gaps": len(all_ontology_gaps),
         "gaps": all_ontology_gaps,

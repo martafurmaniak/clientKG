@@ -199,6 +199,7 @@ def kg_consolidation_agent(
     new_relationships: RelationshipExtractionResult | None = None,
     entities_to_remove: list[str] | None = None,
     relationships_to_remove: list[str] | None = None,
+    relationship_keys_to_remove: list[tuple] | None = None,
     entities_to_update: list | None = None,
     relationships_to_update: list | None = None,
 ) -> KnowledgeGraph:
@@ -211,6 +212,7 @@ def kg_consolidation_agent(
       3. Append new entities (dedup by id)
       4. Append new relationships (dedup by source+target+type)
       5. Remove entities by ID + cascade to orphaned relationships
+      6. Remove relationships by (source, target, type) key  [Fix 10]
     """
     entities:      list = list(existing_kg.entities)
     relationships: list = list(existing_kg.relationships)
@@ -278,9 +280,22 @@ def kg_consolidation_agent(
             if r.source not in remove_entity_ids and r.target not in remove_entity_ids
         ]
 
+    # ── 6. Remove relationships by (source, target, type) key  [Fix 10] ──────
+    if relationship_keys_to_remove:
+        remove_rel_key_set = set(relationship_keys_to_remove)
+        before = len(relationships)
+        relationships = [
+            r for r in relationships
+            if (r.source, r.target, r.type) not in remove_rel_key_set
+        ]
+        removed_rels = before - len(relationships)
+    else:
+        removed_rels = 0
+
     kg = KnowledgeGraph(entities=entities, relationships=relationships)
     print(f"  [KGConsolidationAgent] entities={len(kg.entities)}  relationships={len(kg.relationships)}"
-          + (f"  removed_e={len(remove_entity_ids)}" if remove_entity_ids else ""))
+          + (f"  removed_e={len(remove_entity_ids)}" if remove_entity_ids else "")
+          + (f"  removed_r={removed_rels}" if removed_rels else ""))
     return kg
 
 
@@ -298,6 +313,14 @@ def relationship_extraction_agent(
     all_relationships: list = []
     all_to_remove:     list[str] = []
 
+    # Fix 6: build a slim entity index (id + type + label) to pass alongside
+    # every page so the model can reference cross-page entities by ID even when
+    # those entities were introduced on a different page.
+    entity_index = [
+        {"id": e.id, "type": e.type, "label": e.label}
+        for e in kg.entities
+    ]
+
     for page_idx, page_text in enumerate(document_pages):
         label = f"RelationshipAgent[page {page_idx + 1}, {'improvement' if is_improvement else 'initial'}]"
 
@@ -309,6 +332,7 @@ def relationship_extraction_agent(
                 relationship_ontology=relationship_ontology,
                 existing_kg=kg,
                 kg=kg.to_serialisable(),
+                entity_index=entity_index,
                 missing_relationships=judge_feedback.get("missing_relationships", []),
                 hallucinated_relationships=judge_feedback.get("hallucinated_relationships", []),
                 page_number=page_idx + 1,
@@ -322,6 +346,7 @@ def relationship_extraction_agent(
                 relationship_ontology=relationship_ontology,
                 existing_kg=kg,
                 kg=kg.to_serialisable(),
+                entity_index=entity_index,
                 page_number=page_idx + 1,
                 page_text=page_text,
             )

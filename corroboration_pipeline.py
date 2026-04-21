@@ -29,6 +29,49 @@ from corroboration_loader import CorroborationDoc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Fix 7: Python-side entity deduplication
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _deduplicate_against_existing(
+    new_result: EntityExtractionResult,
+    existing_kg: KnowledgeGraph,
+) -> EntityExtractionResult:
+    """
+    Remove from new_result any entity that already exists in existing_kg,
+    matching on normalised label (case-insensitive, whitespace-stripped).
+
+    This is a safety net for the case where the LLM creates a new node for
+    an entity that already exists in the history KG despite the prompt
+    instruction not to. Only label matching is used — attribute matching
+    is too strict and would miss aliases.
+    """
+    existing_labels = {
+        e.label.strip().lower()
+        for e in existing_kg.entities
+        if e.label
+    }
+
+    kept: list = []
+    skipped = 0
+    for entity in new_result.entities:
+        norm = entity.label.strip().lower() if entity.label else ""
+        if norm and norm in existing_labels:
+            skipped += 1
+            print(f"  [CorrDedup] Skipped duplicate entity '{entity.label}' "
+                  f"(already in KG as same label)")
+        else:
+            kept.append(entity)
+
+    if skipped:
+        print(f"  [CorrDedup] Removed {skipped} duplicate(s), kept {len(kept)} new entities")
+
+    return EntityExtractionResult(
+        entities=kept,
+        entities_to_remove=new_result.entities_to_remove,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Per-page extraction
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -73,6 +116,10 @@ def _extract_page(
     )
     raw_ent    = call_llm(system_prompt, ent_user, label=f"{label}:entities")
     ent_result = parse_and_validate(raw_ent, EntityExtractionResult, label=label)
+
+    # Fix 7: remove any entity the LLM extracted that already exists in the KG
+    all_known = KnowledgeGraph(entities=history_kg.entities + doc_kg_so_far.entities)
+    ent_result = _deduplicate_against_existing(ent_result, all_known)
 
     # ── Relationship extraction ───────────────────────────────────────────────
     combined_for_rels = KnowledgeGraph(
