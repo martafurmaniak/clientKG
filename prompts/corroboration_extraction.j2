@@ -1,0 +1,72 @@
+{% if extraction_target == "entities" %}
+Extract entities from the corroboration document page below.
+
+ENTITY ONTOLOGY (extract only these types):
+{{ entity_ontology | tojson(indent=2) }}
+
+KNOWN ENTITIES FROM CLIENT HISTORY (link to these where possible, do NOT re-extract them):
+{{ known_entities | tojson(indent=2) }}
+
+DOCUMENT SUMMARY (full document context):
+{{ document_summary }}
+
+PAGE {{ page_number }} SUMMARY:
+{{ page_summary }}
+
+Return a JSON object:
+{
+  "entities": [
+    {
+      "id":    "<type_prefix>_corr_<number>",
+      "type":  "<entity type from ontology>",
+      "label": "<short human-readable name>",
+      "attributes": {
+        "<attr>": "<value or null>"
+      }
+    }
+  ],
+  "entities_to_remove": []
+}
+
+Rules:
+- Only extract entities that are NOT already in the known entities list above.
+- If an entity from this page matches a known entity, do NOT re-extract it — you will be able to link to it by its existing id in the relationship step.
+- Use the prefix "_corr_" in ids to distinguish corroboration entities (e.g. "person_corr_1").
+
+{% else %}
+Extract relationships from the corroboration document page below.
+
+RELATIONSHIP ONTOLOGY (only use these types):
+{{ relationship_ontology | tojson(indent=2) }}
+
+ALL AVAILABLE ENTITIES (history KG + newly extracted from this document so far):
+{{ known_entities | tojson(indent=2) }}
+
+DOCUMENT SUMMARY (full document context):
+{{ document_summary }}
+
+PAGE {{ page_number }} SUMMARY:
+{{ page_summary }}
+
+Return:
+{
+  "relationships": [
+    {
+      "type": "<ONTOLOGY_TYPE>",
+      "source": "<entity id>",
+      "target": "<entity id>",
+      "attributes": {
+        "evidence": "<verbatim or paraphrased quote supporting this relationship>",
+        "<attr_name>": "<attr_value or null>"
+      }
+    }
+  ],
+  "relationships_to_remove": []
+}
+
+Rules:
+- "evidence" is REQUIRED on every relationship — never leave it empty.
+- Include ALL attributes defined for the relationship type in the ontology.
+- Do NOT include a "reasoning" field.
+- You may link entities from the history KG to entities from this document.
+{% endif %}
