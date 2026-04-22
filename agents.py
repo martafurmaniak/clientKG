@@ -104,13 +104,17 @@ def _entity_extraction_agent(
     raw    = call_llm(system_prompt, user_prompt, label=agent_name)
     result = parse_and_validate(raw, EntityExtractionResult, label=agent_name)
 
-    # Assign deterministic IDs — LLM-provided IDs are discarded
+    # Assign deterministic IDs — LLM-provided IDs are discarded and replaced
+    # with stable collision-free ones seeded from id_seed_kg (which must include
+    # ALL known entities: history + doc-so-far). entities_to_remove is rewritten
+    # using the id_map in case the LLM referenced its own (now-replaced) IDs.
     seed = id_seed_kg or existing_kg
     if result.entities:
-        new_entities, _id_map = assign_ids(result.entities, seed, entity_ontology)
+        new_entities, id_map = assign_ids(result.entities, seed, entity_ontology)
+        new_to_remove = [id_map.get(eid, eid) for eid in result.entities_to_remove]
         result = EntityExtractionResult(
             entities=new_entities,
-            entities_to_remove=result.entities_to_remove,
+            entities_to_remove=new_to_remove,
         )
 
     mode = "improvement" if is_improvement else "initial"

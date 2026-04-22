@@ -54,14 +54,22 @@ def run_pipeline(
     # ── Phase 1: Entity Extraction ───────────────────────────────────────────
     _banner("PHASE 1 · Entity Extraction")
 
+    # Each agent seeds IDs from the accumulated results of the previous agents
+    # so no two agents can assign the same ID even for the same entity type.
     _section("Running PeopleOrgsAgent")
     people_orgs: EntityExtractionResult = people_and_orgs_agent(document_text, entity_ontology)
 
     _section("Running AssetsAgent")
-    assets: EntityExtractionResult = assets_agent(document_text, entity_ontology)
+    _seed_after_people = KnowledgeGraph(entities=people_orgs.entities)
+    assets: EntityExtractionResult = assets_agent(
+        document_text, entity_ontology, id_seed_kg=_seed_after_people
+    )
 
     _section("Running TransactionsAgent")
-    transactions: EntityExtractionResult = transactions_agent(document_text, entity_ontology)
+    _seed_after_assets = KnowledgeGraph(entities=people_orgs.entities + assets.entities)
+    transactions: EntityExtractionResult = transactions_agent(
+        document_text, entity_ontology, id_seed_kg=_seed_after_assets
+    )
 
     _section("KGConsolidationAgent — merging initial entity extractions")
     combined_entities = EntityExtractionResult(

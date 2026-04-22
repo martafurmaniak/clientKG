@@ -128,20 +128,20 @@ def _extract_page(
     raw_ent    = call_llm(system_prompt, ent_user, label=f"{label}:entities")
     ent_result = parse_and_validate(raw_ent, EntityExtractionResult, label=label)
 
-    # Resolve extracted entities: reuse canonical history/doc entities where
-    # labels match, keep genuinely new ones. All end up in doc_kg (self-contained).
-    ent_result = _resolve_against_existing(ent_result, history_kg, doc_kg_so_far)
-
-    # Assign deterministic IDs to genuinely new entities (resolved ones keep theirs).
-    # Seed from combined_kg so we never clash with any existing ID.
-    new_only = [e for e in ent_result.entities if e.id not in {x.id for x in combined_kg.entities}]
-    reused   = [e for e in ent_result.entities if e.id     in {x.id for x in combined_kg.entities}]
-    if new_only:
-        new_only_assigned, _ = assign_ids(new_only, combined_kg, entity_ontology)
+    # Assign deterministic IDs seeded from combined_kg (history + doc-so-far).
+    # This replaces whatever IDs the LLM chose with stable, collision-free ones.
+    if ent_result.entities:
+        assigned, id_map = assign_ids(ent_result.entities, combined_kg, entity_ontology)
+        new_to_remove = [id_map.get(eid, eid) for eid in ent_result.entities_to_remove]
         ent_result = EntityExtractionResult(
-            entities=reused + new_only_assigned,
-            entities_to_remove=ent_result.entities_to_remove,
+            entities=assigned,
+            entities_to_remove=new_to_remove,
         )
+
+    # Resolve against existing: replace any entity whose label matches a known
+    # entity with the canonical version (original ID + attributes).
+    # This runs AFTER ID assignment — resolved entities keep their original IDs.
+    ent_result = _resolve_against_existing(ent_result, history_kg, doc_kg_so_far)
 
     # ── Relationship extraction ───────────────────────────────────────────────
     # Include history_kg entities in the relationship context so the LLM can
