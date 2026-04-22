@@ -7,6 +7,11 @@ Phase 1 — Client History KG
     contradiction spotting).
 
 Phase 2 — Corroboration KG (optional)
+
+Phase 3 — Reconciliation (optional)
+    Classifies every relationship in the history KG as directly_corroborated,
+    path_corroborated, partially_corroborated, or uncorroborated based on the
+    corroboration graphs. Saves reconciled_kg.json and reconciliation_report.json.
     For each *_summarized.json found in the sibling ocr_corr/ folder, extracts
     a per-document KG using page summaries + document summary as context.
     Each document KG is saved alongside the source file as <name>_kg.json.
@@ -41,6 +46,7 @@ from corroboration_loader import (
 from corroboration_pipeline import run_corroboration_phase
 from ontology_utils import GlobalIDRegistry
 from mock_data import MOCK_CORROBORATION_DOCS
+from reconciliation import reconcile, save_reconciliation_report
 
 # ══════════════════════════════════════════════════════════════
 #  ▶  CONFIGURE HERE
@@ -54,6 +60,9 @@ DOCUMENT_PATH = "data/profiles/MsX/ocr_doc/client_history.json"
 
 # Set to False to skip Phase 2 (useful for quick testing of Phase 1 only)
 RUN_CORROBORATION = True
+
+# Set to False to skip Phase 3
+RUN_RECONCILIATION = True
 
 # ══════════════════════════════════════════════════════════════
 
@@ -201,6 +210,20 @@ def main() -> None:
     for source_file, doc_kg in corr_results.items():
         print(f"   {source_file}: {len(doc_kg.entities)} entities, "
               f"{len(doc_kg.relationships)} relationships")
+
+    if not RUN_RECONCILIATION:
+        print("\n  (Reconciliation phase skipped — RUN_RECONCILIATION=False)")
+        return
+
+    # ── Phase 3: Reconciliation ───────────────────────────────────────────────
+    print("\n\n🚀  KG Extraction Pipeline — Phase 3: Reconciliation")
+    print("─" * 60)
+
+    reconciliation_report = reconcile(
+        history_kg   = history_kg,
+        corr_results = corr_results,
+    )
+    save_reconciliation_report(reconciliation_report, output_dir)
 
 
 if __name__ == "__main__":
