@@ -4,7 +4,6 @@ ENTITY ONTOLOGY:
 {% for e in entity_ontology_rich %}
   Type        : {{ e.type }}
   Description : {{ e.description }}
-  Next ID     : {{ e.next_id }}  ← assign this ID to the first extracted {{ e.type }}, then {{ e.id_prefix }}+1 for each additional one
   label       : write a short human-readable summary of this entity (e.g. "John Smith", "Alpine Bank savings account", "CHF 50k transfer to GlobalTech")
   Attributes  : {{ e.attributes | tojson }}
 {% endfor %}
@@ -19,7 +18,7 @@ Each entity object must have EVERY attribute listed for its type (null if not fo
   "entities": [
 {% for e in entity_ontology_rich %}
     {
-      "id": "{{ e.next_id }}",
+      "id": "<placeholder — will be assigned automatically>",
       "type": "{{ e.type }}",
       "label": "<concise human-readable description of this entity>",
       "attributes": {{ "{" }}{% if e.attributes is mapping %}{% for attr, atype in e.attributes.items() %}"{{ attr }}": null{% if not loop.last %}, {% endif %}{% endfor %}{% else %}{% for attr in e.attributes %}"{{ attr }}": null{% if not loop.last %}, {% endif %}{% endfor %}{% endif %}{{ "}" }}

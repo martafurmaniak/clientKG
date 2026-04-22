@@ -4,7 +4,6 @@ ENTITY ONTOLOGY:
 {% for e in entity_ontology_rich %}
   Type        : {{ e.type }}
   Description : {{ e.description }}
-  Next ID     : {{ e.next_id }}  ← use this for the first new {{ e.type }}, then increment
   label       : write a short human-readable summary of this entity (e.g. "John Smith", "Alpine Bank savings account", "CHF 50k transfer to GlobalTech")
   Attributes  : {{ e.attributes | tojson }}
 {% endfor %}
@@ -26,7 +25,7 @@ Return ONLY new entities to add (do not re-list existing ones):
 {
   "entities": [
     {
-      "id": "<next_id for this type — must not clash with existing IDs above>",
+      "id": "<will be assigned automatically — leave as any placeholder string>",
       "type": "<entity type from ontology>",
       "label": "<concise human-readable description of this entity>",
       "attributes": {

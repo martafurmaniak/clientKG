@@ -3,7 +3,7 @@ Ensure all entities and relationships in your recommendations adhere to the onto
 
 ENTITY ONTOLOGY (all additions and updates must use these types and attributes only):
 {% for e in entity_ontology_rich %}
-  {{ e.type }} (next ID to assign: {{ e.next_id }}): {{ e.attributes | tojson }}
+  {{ e.type }}: {{ e.attributes | tojson }}
 {% endfor %}
 
 RELATIONSHIP ONTOLOGY (all additions must use these types only):
