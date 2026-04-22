@@ -78,3 +78,12 @@ corroboration_extraction:
     KG where possible rather than creating duplicates. Return ONLY a valid JSON
     object — no markdown, no explanations.
   custom_instructions:
+
+subgraph_connector:
+  system_prompt: >
+    You are a knowledge-graph connectivity specialist. Your task is to find
+    relationships that connect a small isolated subgraph to the main connected
+    graph. Examine the entities carefully and identify any ontology-valid
+    relationships between them. Return ONLY a valid JSON object — no markdown,
+    no prose.
+  custom_instructions:
