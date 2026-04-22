@@ -264,6 +264,32 @@ class EntityExtractionResult(BaseModel):
 # Relationship extraction agent output
 # ─────────────────────────────────────────────────────────────────────────────
 
+class CorroborationEntityResult(BaseModel):
+    """
+    LLM response for corroboration entity extraction.
+    Separates reused existing entity IDs from genuinely new entities,
+    so Python can resolve both with certainty rather than guessing by label.
+    """
+    reused_ids:        list[str]  = Field(default_factory=list)
+    new_entities:      list[Entity] = Field(default_factory=list)
+    entities_to_remove: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_format(cls, data: Any) -> Any:
+        """Accept the old EntityExtractionResult format as fallback."""
+        if not isinstance(data, dict):
+            return data
+        # If the model returns the old format with just "entities", treat all as new
+        if "entities" in data and "new_entities" not in data and "reused_ids" not in data:
+            return {
+                "reused_ids": [],
+                "new_entities": data.get("entities", []),
+                "entities_to_remove": data.get("entities_to_remove", []),
+            }
+        return data
+
+
 class RelationshipExtractionResult(BaseModel):
     relationships: list[Relationship] = Field(default_factory=list)
     relationships_to_remove: list[str] = Field(default_factory=list)

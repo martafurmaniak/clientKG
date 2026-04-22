@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from schemas import KnowledgeGraph, EntityExtractionResult, RelationshipExtractionResult
+from schemas import KnowledgeGraph, EntityExtractionResult, RelationshipExtractionResult, CorroborationEntityResult
 from ontology_utils import assign_ids
 from agents import kg_consolidation_agent
 from llm_utils import call_llm, parse_and_validate
@@ -126,22 +126,35 @@ def _extract_page(
         page_number=page_number,
     )
     raw_ent    = call_llm(system_prompt, ent_user, label=f"{label}:entities")
-    ent_result = parse_and_validate(raw_ent, EntityExtractionResult, label=label)
+    corr_result = parse_and_validate(raw_ent, CorroborationEntityResult, label=label)
 
-    # Assign deterministic IDs seeded from combined_kg (history + doc-so-far).
-    # This replaces whatever IDs the LLM chose with stable, collision-free ones.
-    if ent_result.entities:
-        assigned, id_map = assign_ids(ent_result.entities, combined_kg, entity_ontology)
-        new_to_remove = [id_map.get(eid, eid) for eid in ent_result.entities_to_remove]
-        ent_result = EntityExtractionResult(
-            entities=assigned,
-            entities_to_remove=new_to_remove,
-        )
+    # ── Resolve reused_ids → canonical entities from combined_kg ─────────────
+    # The LLM explicitly listed the IDs of existing entities it recognises.
+    # Look them up directly — no label guessing needed.
+    combined_id_map = {e.id: e for e in combined_kg.entities}
+    reused_entities = []
+    for eid in corr_result.reused_ids:
+        if eid in combined_id_map:
+            reused_entities.append(combined_id_map[eid])
+            print(f"  [CorrDedup] Reused entity id={eid} ({combined_id_map[eid].label})")
+        else:
+            print(f"  [CorrDedup] ⚠ reused_id '{eid}' not found in combined KG — skipped")
 
-    # Resolve against existing: replace any entity whose label matches a known
-    # entity with the canonical version (original ID + attributes).
-    # This runs AFTER ID assignment — resolved entities keep their original IDs.
-    ent_result = _resolve_against_existing(ent_result, history_kg, doc_kg_so_far)
+    # ── Assign deterministic IDs to genuinely new entities ────────────────────
+    # Seed from combined_kg so new IDs never clash with any existing entity.
+    new_entities = corr_result.new_entities
+    if new_entities:
+        new_entities, id_map = assign_ids(new_entities, combined_kg, entity_ontology)
+        new_to_remove = [id_map.get(eid, eid) for eid in corr_result.entities_to_remove]
+    else:
+        new_to_remove = corr_result.entities_to_remove
+
+    # ── Combine: reused (canonical) + new (freshly assigned IDs) ─────────────
+    ent_result = EntityExtractionResult(
+        entities=reused_entities + new_entities,
+        entities_to_remove=new_to_remove,
+    )
+    print(f"  {label} entities: {len(reused_entities)} reused, {len(new_entities)} new")
 
     # ── Relationship extraction ───────────────────────────────────────────────
     # Include history_kg entities in the relationship context so the LLM can
