@@ -9,13 +9,14 @@ ENTITY ONTOLOGY:
   Attributes  : {{ e.attributes | tojson }}
 {% endfor %}
 
-ENTITIES ALREADY IN THE GRAPH — do NOT create new nodes for these; use their existing IDs:
+ENTITIES ALREADY IN THE GRAPH (cumulative — history + previous corroboration documents):
 {{ known_entities | tojson(indent=2) }}
 
-MATCHING RULE: Before extracting a new entity, check if any entity in the list above
-matches by name, alias, or description. If it matches — even partially or under a
-slightly different spelling — use the existing entity's ID in the relationship step
-instead of creating a new node.
+TASK:
+1. For each entity mentioned in the page, check if it already exists in the list above
+   by matching on name, alias, label, or key attributes. Use exact AND partial/fuzzy matching.
+2. If it matches an existing entity → add its ID to "reused_ids". Do NOT re-extract it.
+3. If it is genuinely new (not in the list) → add it to "new_entities".
 
 DOCUMENT SUMMARY:
 {{ document_summary }}
@@ -23,14 +24,16 @@ DOCUMENT SUMMARY:
 PAGE {{ page_number }} SUMMARY:
 {{ page_summary }}
 
-Return ONLY entities NOT already in the graph above:
-
+Return:
 {
-  "entities": [
+  "reused_ids": [
+    "<id of existing entity from the graph that appears on this page>"
+  ],
+  "new_entities": [
     {
-      "id": "<will be assigned automatically — leave as any placeholder string>",
+      "id": "<placeholder — will be replaced automatically>",
       "type": "<entity type from ontology>",
-      "label": "<concise human-readable description of this entity>",
+      "label": "<concise human-readable description>",
       "attributes": {
         "<every attribute for this type>": "<value or null>"
       }
@@ -40,34 +43,16 @@ Return ONLY entities NOT already in the graph above:
 }
 
 Rules:
-- Use ONLY ontology-defined types and attributes.
-- "label" must be a concise human-readable description of the entity. Do NOT copy an attribute value verbatim.
-- Every attribute must appear — use null if not found.
+- "reused_ids" must only contain IDs that exist verbatim in the known entities list above.
+- "new_entities" must only contain entities with NO match in the known entities list.
+- Use ONLY ontology-defined types and attributes for new entities.
+- Every attribute must appear for new entities — use null if not found.
 - Do not invent values.
 
 {% else %}
 Extract relationships from the corroboration document page, following the ontology exactly.
 
-RELATIONSHIP ONTOLOGY:
-{% for r in relationship_ontology_rich %}
-  Type       : {{ r.type }}
-  Description: {{ r.description }}
-  From       : {{ r.from | join(" or ") }}  →  To: {{ r.to | join(" or ") }}
-  Attributes : {{ r.attributes | tojson }}
-{% endfor %}
-
-ALL AVAILABLE ENTITIES (use their exact IDs as source/target):
-{{ known_entities | tojson(indent=2) }}
-
-DOCUMENT SUMMARY:
-{{ document_summary }}
-
-PAGE {{ page_number }} SUMMARY:
-{{ page_summary }}
-
-For EACH relationship type, the required output structure is shown below.
-Return only relationship types that are supported by evidence in the document.
-
+RELATIONSHIP ONTOLOGY — for each type the exact attributes to include are listed:
 {% for r in relationship_ontology_rich %}
 {{ r.type }}:
   {
@@ -83,16 +68,26 @@ Return only relationship types that are supported by evidence in the document.
   }
 {% endfor %}
 
+ALL AVAILABLE ENTITIES (use their exact IDs as source/target):
+{{ known_entities | tojson(indent=2) }}
+
+DOCUMENT SUMMARY:
+{{ document_summary }}
+
+PAGE {{ page_number }} SUMMARY:
+{{ page_summary }}
+
 Return:
 {
-  "relationships": [ ... one object per relationship found, using the exact structure above ... ],
+  "relationships": [ ... one object per relationship found, using the structure shown above for each type ... ],
   "relationships_to_remove": []
 }
 
 Rules:
 - Use ONLY ontology-defined relationship types.
-- source/target must match the allowed From/To types.
-- Include ONLY the attribute keys defined for the specific relationship type plus "evidence". Do NOT add keys not in the ontology.
+- source/target must match the allowed From/To entity types.
+- Include ONLY the attribute keys shown for the specific relationship type plus "evidence".
+- Every listed attribute must appear — use null if not found.
 - "evidence" is REQUIRED — never leave it empty.
 - Do NOT include a "reasoning" field.
 - You may link history KG entities to new corroboration entities.
