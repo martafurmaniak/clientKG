@@ -1,0 +1,52 @@
+The knowledge graph has disconnected subgraphs that need to be connected.
+
+RELATIONSHIP ONTOLOGY — use ONLY these types:
+{% for r in relationship_ontology_rich %}
+  Type       : {{ r.type }}
+  Description: {{ r.description }}
+  From       : {{ r.from | join(" or ") }}  →  To: {{ r.to | join(" or ") }}
+  Attributes : {{ r.attributes | tojson }}
+{% endfor %}
+
+MAIN GRAPH ENTITIES (the large connected component — connect the isolated entities to these):
+{{ main_entities | tojson(indent=2) }}
+
+ISOLATED ENTITIES (the small disconnected subgraph — find connections from these to the main graph):
+{{ isolated_entities | tojson(indent=2) }}
+
+DOCUMENT TEXT (use this as evidence for any relationships you find):
+{{ document_text }}
+
+TASK:
+Find all relationships that connect the ISOLATED ENTITIES to the MAIN GRAPH ENTITIES.
+There must be at least one relationship. Look carefully — the connection may be indirect
+or expressed through shared attributes (same person, same organisation, same account, etc.).
+
+For EACH relationship type the required output structure is:
+{% for r in relationship_ontology_rich %}
+{{ r.type }}:
+  {
+    "type": "{{ r.type }}",
+    "source": "<id of a {{ r.from | join(' or ') }} entity>",
+    "target": "<id of a {{ r.to | join(' or ') }} entity>",
+    "attributes": {
+      "evidence": "<verbatim or paraphrased quote from document>",
+      {% if r.attributes is mapping %}{% for attr in r.attributes.keys() %}"{{ attr }}": "<value or null>"{% if not loop.last %},
+      {% endif %}{% endfor %}{% endif %}
+
+    }
+  }
+{% endfor %}
+
+Return:
+{
+  "relationships": [ ... all relationships connecting isolated entities to main graph entities ... ],
+  "reasoning": "<brief explanation of how these subgraphs are connected>"
+}
+
+Rules:
+- source and target must be IDs that exist in either the main or isolated entity lists above.
+- At least one endpoint of each relationship must be in the isolated entities list.
+- At least one endpoint of each relationship must be in the main graph entities list.
+- Use ONLY ontology-defined relationship types.
+- "evidence" is REQUIRED on every relationship.
