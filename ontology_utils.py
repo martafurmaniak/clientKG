@@ -159,54 +159,93 @@ def get_next_id_map(entity_ontology: dict, kg=None) -> dict[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Deterministic ID assignment
+# Global ID registry — single source of truth for all entity IDs
+# ─────────────────────────────────────────────────────────────────────────────
+
+class GlobalIDRegistry:
+    """
+    Persistent counter for entity IDs across the entire pipeline run.
+
+    Instantiated once in main.py, seeded from the history KG, then passed
+    through every extraction call. Every new entity ID is assigned here and
+    the registry is immediately updated, so no two entities in the whole run
+    — across history, corroboration documents, and refinement loops — ever
+    share the same ID.
+
+    Usage:
+        registry = GlobalIDRegistry.from_kg(history_kg)
+        new_id   = registry.next("Person")    # → "P6" if P1–P5 are taken
+        registry.register_id("P6")            # redundant here, done by next()
+    """
+
+    def __init__(self) -> None:
+        self._max: dict[str, int] = defaultdict(int)
+        self._taken: set[str] = set()
+
+    @classmethod
+    def from_kg(cls, kg) -> "GlobalIDRegistry":
+        """Seed from all entities in an existing KnowledgeGraph."""
+        reg = cls()
+        for entity in (kg.entities if kg else []):
+            reg.register_id(entity.id, entity.type)
+        return reg
+
+    def register_id(self, entity_id: str, entity_type: str = "") -> None:
+        """
+        Record that an entity_id is taken.
+        Updates the max counter for the prefix so next() skips past it.
+        """
+        self._taken.add(entity_id)
+        prefix = get_id_prefix(entity_type) if entity_type else re.sub(r"\d+$", "", entity_id)
+        m = re.search(r"(\d+)$", entity_id)
+        if m:
+            n = int(m.group(1))
+            if n > self._max[prefix]:
+                self._max[prefix] = n
+
+    def register_kg(self, kg) -> None:
+        """Register all entities in a KnowledgeGraph."""
+        for entity in kg.entities:
+            self.register_id(entity.id, entity.type)
+
+    def next(self, entity_type: str) -> str:
+        """Return the next available ID for entity_type and mark it taken."""
+        prefix = get_id_prefix(entity_type)
+        self._max[prefix] += 1
+        new_id = f"{prefix}{self._max[prefix]}"
+        self._taken.add(new_id)
+        return new_id
+
+    def assign(self, entities: list) -> tuple[list, dict[str, str]]:
+        """
+        Replace LLM-assigned IDs on a list of Entity objects with stable ones.
+        Returns (new_entity_list, old_id → new_id mapping).
+        """
+        id_map: dict[str, str] = {}
+        result = []
+        for entity in entities:
+            new_id = self.next(entity.type)
+            id_map[entity.id] = new_id
+            result.append(entity.model_copy(update={"id": new_id}))
+        return result, id_map
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy assign_ids — kept for backward compatibility, delegates to a
+# temporary registry seeded from seed_kg
 # ─────────────────────────────────────────────────────────────────────────────
 
 def assign_ids(
     entities: list,
     seed_kg,
     entity_ontology: dict,
-) -> list:
+) -> tuple[list, dict[str, str]]:
     """
-    Replace every LLM-assigned entity ID with a stable, collision-free one.
-
-    Algorithm:
-      1. Build the current max numeric suffix per prefix from seed_kg.entities
-         (which must include ALL known entities — history + any doc-so-far).
-      2. For each incoming entity, derive its prefix from entity_ontology,
-         increment the counter, and assign the new ID.
-      3. Rewrite any relationship source/target references inside the same
-         batch to use the new IDs (not applicable here — relationships are
-         handled separately — but we return a mapping for callers that need it).
-
-    Returns the entities list with IDs replaced in-place (new objects, immutable).
-    Also returns an old_id → new_id mapping so relationship source/target
-    references can be updated by the caller if needed.
+    Backward-compatible wrapper. Prefer GlobalIDRegistry.assign() for new code.
+    Creates a temporary registry seeded from seed_kg and assigns IDs.
     """
-    import re as _re
-    from collections import defaultdict
-
-    # Seed counters from all existing entities
-    max_counts: dict[str, int] = defaultdict(int)
-    for e in (seed_kg.entities if seed_kg else []):
-        prefix = get_id_prefix(e.type)
-        m = _re.search(r"(\d+)$", e.id)
-        if m:
-            n = int(m.group(1))
-            if n > max_counts[prefix]:
-                max_counts[prefix] = n
-
-    id_map: dict[str, str] = {}   # old_id → new_id
-    result = []
-    for entity in entities:
-        prefix  = get_id_prefix(entity.type)
-        max_counts[prefix] += 1
-        new_id  = f"{prefix}{max_counts[prefix]}"
-        old_id  = entity.id
-        id_map[old_id] = new_id
-        result.append(entity.model_copy(update={"id": new_id}))
-
-    return result, id_map
+    reg = GlobalIDRegistry.from_kg(seed_kg)
+    return reg.assign(entities)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 
 from schemas import KnowledgeGraph, EntityExtractionResult, RelationshipExtractionResult, CorroborationEntityResult
-from ontology_utils import assign_ids
+from ontology_utils import assign_ids, GlobalIDRegistry
 from agents import kg_consolidation_agent
 from llm_utils import call_llm, parse_and_validate
 from prompt_loader import render_with_ontology, get_system_prompt
@@ -92,6 +92,7 @@ def _extract_page(
     doc_kg_so_far: KnowledgeGraph,
     page_idx: int,
     total_pages: int,
+    id_registry: "GlobalIDRegistry | None" = None,
 ) -> tuple[EntityExtractionResult, RelationshipExtractionResult]:
     """
     Extract entities and relationships from a single corroboration page.
@@ -190,6 +191,7 @@ def run_corroboration_document(
     history_kg: KnowledgeGraph,
     entity_ontology: dict,
     relationship_ontology: dict,
+    id_registry: "GlobalIDRegistry | None" = None,
 ) -> KnowledgeGraph:
     """
     Process a single corroboration document:
@@ -213,6 +215,7 @@ def run_corroboration_document(
             doc_kg_so_far=doc_kg,
             page_idx=page_idx,
             total_pages=len(doc.pages),
+            id_registry=id_registry,
         )
         doc_kg = kg_consolidation_agent(
             existing_kg=doc_kg,
@@ -244,6 +247,7 @@ def run_corroboration_document(
         entity_ontology=entity_ontology,
         relationship_ontology=relationship_ontology,
         label=label,
+        id_registry=id_registry,
     )
 
     doc_kg = refinement.kg
@@ -266,6 +270,7 @@ def run_corroboration_phase(
     history_kg: KnowledgeGraph,
     entity_ontology: dict,
     relationship_ontology: dict,
+    id_registry: "GlobalIDRegistry | None" = None,
 ) -> dict[str, KnowledgeGraph]:
     """
     Process all corroboration documents in order.
@@ -288,12 +293,19 @@ def run_corroboration_phase(
     # Starts as the client history KG; accumulates new entities from each doc
     cumulative_kg = history_kg
 
+    # Seed registry from history KG if not provided externally
+    if id_registry is None:
+        id_registry = GlobalIDRegistry.from_kg(history_kg)
+    else:
+        id_registry.register_kg(history_kg)
+
     for doc in docs:
         doc_kg = run_corroboration_document(
             doc=doc,
-            history_kg=cumulative_kg,   # includes all previously seen entities
+            history_kg=cumulative_kg,
             entity_ontology=entity_ontology,
             relationship_ontology=relationship_ontology,
+            id_registry=id_registry,
         )
 
         doc.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -308,6 +320,8 @@ def run_corroboration_phase(
         # Dedup by ID — existing entities are never overwritten.
         existing_ids = {e.id for e in cumulative_kg.entities}
         new_entities  = [e for e in doc_kg.entities if e.id not in existing_ids]
+        for e in new_entities:
+            id_registry.register_id(e.id, e.type)
         if new_entities:
             cumulative_kg = KnowledgeGraph(
                 entities=cumulative_kg.entities + new_entities,

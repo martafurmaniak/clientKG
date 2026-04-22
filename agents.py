@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from llm_utils import call_llm, parse_and_validate
 from prompt_loader import render, render_with_ontology, get_system_prompt, get_instructions
-from ontology_utils import assign_ids, get_id_prefix
+from ontology_utils import assign_ids, GlobalIDRegistry, get_id_prefix
 from schemas import (
     KnowledgeGraph,
     EntityExtractionResult,
@@ -53,17 +53,14 @@ def _entity_extraction_agent(
     custom_instructions: str | None = None,
     page_text: str | None = None,
     id_seed_kg: KnowledgeGraph | None = None,
+    id_registry: "GlobalIDRegistry | None" = None,
 ) -> EntityExtractionResult:
     """
     Generic entity extractor.
 
-    Initial run  — extracts all entities of `entity_types` from `document_text`.
-    Improvement  — receives existing KG + judge feedback; returns only the
-                   delta (new entities to add, IDs to remove).
-
-    id_seed_kg : KG used for deterministic ID assignment. Must contain ALL
-                 known entities (history + doc-so-far) so new IDs never clash.
-                 Falls back to existing_kg if not provided.
+    id_registry : GlobalIDRegistry — when provided IDs are assigned via the
+                  global registry (unique across the entire pipeline run).
+                  Falls back to assign_ids seeded from id_seed_kg or existing_kg.
     """
     ontology_subset = {k: v for k, v in entity_ontology.items() if k in entity_types}
     is_improvement  = existing_kg is not None and judge_feedback is not None
@@ -104,13 +101,15 @@ def _entity_extraction_agent(
     raw    = call_llm(system_prompt, user_prompt, label=agent_name)
     result = parse_and_validate(raw, EntityExtractionResult, label=agent_name)
 
-    # Assign deterministic IDs — LLM-provided IDs are discarded and replaced
-    # with stable collision-free ones seeded from id_seed_kg (which must include
-    # ALL known entities: history + doc-so-far). entities_to_remove is rewritten
-    # using the id_map in case the LLM referenced its own (now-replaced) IDs.
-    seed = id_seed_kg or existing_kg
+    # Assign deterministic IDs — LLM-provided IDs are discarded.
+    # Use global registry when available (unique across entire pipeline run);
+    # fall back to seed_kg-based assign_ids otherwise.
     if result.entities:
-        new_entities, id_map = assign_ids(result.entities, seed, entity_ontology)
+        if id_registry is not None:
+            new_entities, id_map = id_registry.assign(result.entities)
+        else:
+            seed = id_seed_kg or existing_kg
+            new_entities, id_map = assign_ids(result.entities, seed, entity_ontology)
         new_to_remove = [id_map.get(eid, eid) for eid in result.entities_to_remove]
         result = EntityExtractionResult(
             entities=new_entities,
@@ -165,6 +164,7 @@ def people_and_orgs_agent(
     judge_feedback: dict | None = None,
     custom_instructions: str | None = None,
     id_seed_kg: KnowledgeGraph | None = None,
+    id_registry: "GlobalIDRegistry | None" = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _PEOPLE_ORG_KW)
     if not types:
@@ -175,6 +175,7 @@ def people_and_orgs_agent(
         existing_kg, judge_feedback,
         custom_instructions=custom_instructions or get_instructions("people_orgs"),
         id_seed_kg=id_seed_kg,
+        id_registry=id_registry,
     )
 
 
@@ -185,6 +186,7 @@ def assets_agent(
     judge_feedback: dict | None = None,
     custom_instructions: str | None = None,
     id_seed_kg: KnowledgeGraph | None = None,
+    id_registry: "GlobalIDRegistry | None" = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _ASSET_KW)
     return _entity_extraction_agent(
@@ -192,6 +194,7 @@ def assets_agent(
         existing_kg, judge_feedback,
         custom_instructions=custom_instructions or get_instructions("assets"),
         id_seed_kg=id_seed_kg,
+        id_registry=id_registry,
     )
 
 
@@ -202,6 +205,7 @@ def transactions_agent(
     judge_feedback: dict | None = None,
     custom_instructions: str | None = None,
     id_seed_kg: KnowledgeGraph | None = None,
+    id_registry: "GlobalIDRegistry | None" = None,
 ) -> EntityExtractionResult:
     types = _pick_types(entity_ontology, _TRANSACTION_KW)
     return _entity_extraction_agent(
@@ -209,6 +213,7 @@ def transactions_agent(
         existing_kg, judge_feedback,
         custom_instructions=custom_instructions or get_instructions("transactions"),
         id_seed_kg=id_seed_kg,
+        id_registry=id_registry,
     )
 
 

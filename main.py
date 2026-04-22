@@ -39,6 +39,7 @@ from corroboration_loader import (
     load_corroboration_docs_mock,
 )
 from corroboration_pipeline import run_corroboration_phase
+from ontology_utils import GlobalIDRegistry
 from mock_data import MOCK_CORROBORATION_DOCS
 
 # ══════════════════════════════════════════════════════════════
@@ -149,12 +150,18 @@ def main() -> None:
     if RUN_MODE == "real":
         _print_page_preview(inputs.document_pages)
 
+    # Single global registry for the entire run — survives across phases
+    id_registry = GlobalIDRegistry()
+
     phase1_result = run_pipeline(
         document_text         = inputs.document_text,
         document_pages        = inputs.document_pages,
         entity_ontology       = inputs.entity_ontology,
         relationship_ontology = inputs.relationship_ontology,
+        id_registry           = id_registry,
     )
+    # Registry is returned populated with all history KG entity IDs
+    id_registry = phase1_result.get("id_registry", id_registry)
 
     output_dir = _output_dir()
     _save_phase1_outputs(phase1_result, output_dir)
@@ -187,6 +194,7 @@ def main() -> None:
         history_kg            = history_kg,
         entity_ontology       = inputs.entity_ontology,
         relationship_ontology = inputs.relationship_ontology,
+        id_registry           = id_registry,   # continues from history phase
     )
 
     print(f"\n✅  Phase 2 complete — {len(corr_results)} corroboration KG(s) saved.")

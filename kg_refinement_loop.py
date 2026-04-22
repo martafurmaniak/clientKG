@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ontology_utils import GlobalIDRegistry
 from agents import (
     people_and_orgs_agent,
     assets_agent,
@@ -209,6 +210,7 @@ def run_refinement_loop(
     entity_ontology: dict,
     relationship_ontology: dict,
     label: str = "",
+    id_registry: "GlobalIDRegistry | None" = None,
 ) -> RefinementResult:
     """
     Run the curator loop followed by stray-node check on an already-extracted KG.
@@ -249,15 +251,16 @@ def run_refinement_loop(
 
         if curator.status == "complete":
             _section("KG deemed complete — running stray-node + compliance check")
+            _kg_ref_complete = [kg]
             _run_stray_compliance_loop(
-                kg_ref=[kg],
+                kg_ref=_kg_ref_complete,
                 entity_ontology=entity_ontology,
                 relationship_ontology=relationship_ontology,
                 document_text=document_text,
                 all_ontology_gaps=all_ontology_gaps,
                 prefix=prefix,
             )
-            kg = kg_ref[0]
+            kg = _kg_ref_complete[0]
             break
 
         # ── Apply curator actions ─────────────────────────────────────────────
@@ -293,21 +296,24 @@ def run_refinement_loop(
                 all_entity_parts.append(
                     people_and_orgs_agent(pt, entity_ontology,
                                           existing_kg=kg, judge_feedback=page_feedback,
-                                          id_seed_kg=kg)
+                                          id_seed_kg=kg,
+                                          id_registry=id_registry)
                 )
             if sel["assets"]:
                 _section(f"AssetsAgent — {pl}")
                 all_entity_parts.append(
                     assets_agent(pt, entity_ontology,
                                  existing_kg=kg, judge_feedback=page_feedback,
-                                 id_seed_kg=kg)
+                                 id_seed_kg=kg,
+                                 id_registry=id_registry)
                 )
             if sel["transactions"]:
                 _section(f"TransactionsAgent — {pl}")
                 all_entity_parts.append(
                     transactions_agent(pt, entity_ontology,
                                        existing_kg=kg, judge_feedback=page_feedback,
-                                       id_seed_kg=kg)
+                                       id_seed_kg=kg,
+                                       id_registry=id_registry)
                 )
 
         # Relationship additions — grouped by page
