@@ -311,15 +311,30 @@ def _validate_ontology_compliance(
             source_type = id_to_type.get(rel.source)
             target_type = id_to_type.get(rel.target)
 
-            if allowed_from and source_type and source_type not in allowed_from:
-                print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
-                      f"source type '{source_type}' not in allowed from {allowed_from}, removed")
-                continue
+            source_ok = not allowed_from or not source_type or source_type in allowed_from
+            target_ok = not allowed_to   or not target_type or target_type in allowed_to
 
-            if allowed_to and target_type and target_type not in allowed_to:
-                print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
-                      f"target type '{target_type}' not in allowed to {allowed_to}, removed")
-                continue
+            if not source_ok or not target_ok:
+                # Before dropping, check if inverting source↔target satisfies the ontology
+                inverted_source_ok = not allowed_from or not target_type or target_type in allowed_from
+                inverted_target_ok = not allowed_to   or not source_type or source_type in allowed_to
+
+                if inverted_source_ok and inverted_target_ok:
+                    # Invert the relationship direction — keep it
+                    print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                          f"inverted source↔target to satisfy ontology "
+                          f"({source_type}→{target_type} became {target_type}→{source_type})")
+                    rel = rel.model_copy(update={"source": rel.target, "target": rel.source})
+                else:
+                    if not source_ok:
+                        print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                              f"source type '{source_type}' not in allowed from {allowed_from}, "
+                              f"inversion also invalid, removed")
+                    else:
+                        print(f"  [OntologyCheck] Relationship {rel.source}→{rel.target} [{rtype}]: "
+                              f"target type '{target_type}' not in allowed to {allowed_to}, "
+                              f"inversion also invalid, removed")
+                    continue
 
             # ── Strip disallowed attributes (keep evidence always) ────────────
             allowed_raw  = ont_rel.get("attributes", {})
