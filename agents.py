@@ -579,6 +579,84 @@ def relationship_extraction_agent(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3b. Subgraph connectivity utilities + agent
+# ─────────────────────────────────────────────────────────────────────────────
+
+def find_connected_components(kg: KnowledgeGraph) -> list[set[str]]:
+    """
+    Return a list of connected components (each a set of entity IDs).
+    Uses union-find on the relationship graph — purely deterministic, no LLM.
+    Isolated entities (no relationships) each form their own singleton component.
+    """
+    parent: dict[str, str] = {e.id: e.id for e in kg.entities}
+
+    def _find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]   # path compression
+            x = parent[x]
+        return x
+
+    def _union(a: str, b: str) -> None:
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for rel in kg.relationships:
+        if rel.source in parent and rel.target in parent:
+            _union(rel.source, rel.target)
+
+    # Group entity IDs by root
+    groups: dict[str, set[str]] = {}
+    for eid in parent:
+        root = _find(eid)
+        groups.setdefault(root, set()).add(eid)
+
+    return list(groups.values())
+
+
+def subgraph_connector_agent(
+    kg: KnowledgeGraph,
+    main_entity_ids: set[str],
+    isolated_entity_ids: set[str],
+    relationship_ontology: dict,
+    document_text: str,
+) -> RelationshipExtractionResult:
+    """
+    Ask the LLM to find relationships connecting an isolated subgraph to the
+    main connected component.
+
+    Returns a RelationshipExtractionResult with the bridging relationships.
+    """
+    main_entities     = [e.to_dict() for e in kg.entities if e.id in main_entity_ids]
+    isolated_entities = [e.to_dict() for e in kg.entities if e.id in isolated_entity_ids]
+
+    system_prompt = get_system_prompt("subgraph_connector")
+    user_prompt   = render_with_ontology(
+        "subgraph_connector.j2",
+        entity_ontology={},
+        relationship_ontology=relationship_ontology,
+        main_entities=main_entities,
+        isolated_entities=isolated_entities,
+        document_text=document_text,
+    )
+
+    raw    = call_llm(system_prompt, user_prompt, label="SubgraphConnector")
+    result = parse_and_validate(raw, RelationshipExtractionResult, label="SubgraphConnector")
+
+    # Keep only relationships that actually bridge the two subgraphs
+    bridging = [
+        r for r in result.relationships
+        if (r.source in main_entity_ids and r.target in isolated_entity_ids)
+        or (r.source in isolated_entity_ids and r.target in main_entity_ids)
+    ]
+    if len(bridging) < len(result.relationships):
+        print(f"  [SubgraphConnector] Filtered to {len(bridging)} bridging "
+              f"relationships (dropped {len(result.relationships) - len(bridging)} non-bridging)")
+
+    return RelationshipExtractionResult(relationships=bridging)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4. Stray node detection agent
 # ─────────────────────────────────────────────────────────────────────────────
 

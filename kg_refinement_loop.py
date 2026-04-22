@@ -34,6 +34,8 @@ from agents import (
     stray_node_agent,
     kg_curator_agent,
     validate_kg,
+    find_connected_components,
+    subgraph_connector_agent,
 )
 from schemas import (
     KnowledgeGraph,
@@ -190,10 +192,58 @@ def _run_stray_compliance_loop(
             len(kg.relationships) == r_before
         )
 
+        # ── Step 3: disconnected subgraph merging ────────────────────────────
+        # After stray nodes are resolved and compliance checked, look for
+        # isolated subgraphs (groups of connected nodes not connected to the
+        # rest). Process from smallest to largest, connecting each to the
+        # growing main graph.
+        components = find_connected_components(kg)
+        if len(components) > 1:
+            subgraph_clean = False
+            _section(f"SubgraphCheck — {len(components)} disconnected components found")
+
+            # Sort ascending by size; the largest becomes the initial main graph
+            components.sort(key=len)
+            main_ids = components[-1]   # largest component
+
+            for comp in components[:-1]:
+                _section(f"SubgraphConnector — merging component of {len(comp)} node(s) "
+                         f"into main graph ({len(main_ids)} nodes)")
+                bridge = subgraph_connector_agent(
+                    kg=kg,
+                    main_entity_ids=main_ids,
+                    isolated_entity_ids=comp,
+                    relationship_ontology=relationship_ontology,
+                    document_text=document_text,
+                )
+                if bridge.relationships:
+                    kg = kg_consolidation_agent(
+                        existing_kg=kg,
+                        new_relationships=bridge,
+                        entity_ontology=entity_ontology,
+                        relationship_ontology=relationship_ontology,
+                    )
+                    # Expand main_ids to include the now-connected component
+                    main_ids = main_ids | comp
+                    print(f"  {prefix}Merged subgraph — main graph now {len(main_ids)} nodes")
+                else:
+                    print(f"  {prefix}⚠ Could not find bridge for component "
+                          f"{comp} — recording as ontology gap")
+                    for eid in comp:
+                        entity = next((e for e in kg.entities if e.id == eid), None)
+                        all_ontology_gaps.append({
+                            "entity_id": eid,
+                            "reasoning": "Entity is in a disconnected subgraph with no "
+                                         "ontology-valid path to the main graph.",
+                            "evidence": entity.label if entity else "",
+                        })
+        else:
+            subgraph_clean = True
+
         kg_ref[0] = kg
 
-        if stray_clean and compliance_clean:
-            _section("All nodes connected and KG fully compliant")
+        if stray_clean and compliance_clean and subgraph_clean:
+            _section("All nodes connected, KG fully compliant, no isolated subgraphs")
             break
     else:
         print(f"  {prefix}⚠ Stray+compliance loop hit max iterations.")
