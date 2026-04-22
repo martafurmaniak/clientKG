@@ -52,7 +52,18 @@ Rules:
 {% else %}
 Extract relationships from the corroboration document page, following the ontology exactly.
 
-RELATIONSHIP ONTOLOGY — for each type the exact attributes to include are listed:
+RELATIONSHIP ONTOLOGY — use ONLY these types:
+{% for r in relationship_ontology_rich %}
+  ┌─ {{ r.type }}
+  │  Description : {{ r.description }}
+  │  From        : {{ r.from | join(" or ") }}  →  To: {{ r.to | join(" or ") }}
+  │  Attributes  :
+  │    evidence         (string, REQUIRED) — verbatim or paraphrased quote from the document
+{% if r.attributes is mapping and r.attributes %}{% for attr, atype in r.attributes.items() %}  │    {{ attr.ljust(18) }} ({{ atype }})
+{% endfor %}{% endif %}  └─────────────────────────────
+{% endfor %}
+
+For EACH relationship type, the required output structure is:
 {% for r in relationship_ontology_rich %}
 {{ r.type }}:
   {
@@ -60,22 +71,11 @@ RELATIONSHIP ONTOLOGY — for each type the exact attributes to include are list
     "source": "<id of a {{ r.from | join(' or ') }} entity>",
     "target": "<id of a {{ r.to | join(' or ') }} entity>",
     "attributes": {
-      "evidence": "<verbatim or paraphrased quote from document>",
-      {% if r.attributes is mapping %}{% for attr in r.attributes.keys() %}"{{ attr }}": "<value or null>"{% if not loop.last %},
-      {% endif %}{% endfor %}{% endif %}
-
-    }
+      "evidence": "<verbatim or paraphrased quote — REQUIRED>",
+{% if r.attributes is mapping and r.attributes %}{% for attr, atype in r.attributes.items() %}      "{{ attr }}": "<{{ atype }} or null>",
+{% endfor %}{% endif %}    }
   }
 {% endfor %}
-
-ALL AVAILABLE ENTITIES (use their exact IDs as source/target):
-{{ known_entities | tojson(indent=2) }}
-
-DOCUMENT SUMMARY:
-{{ document_summary }}
-
-PAGE {{ page_number }} SUMMARY:
-{{ page_summary }}
 
 Return:
 {
