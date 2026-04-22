@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from llm_utils import call_llm, parse_and_validate
 from prompt_loader import render, render_with_ontology, get_system_prompt, get_instructions
+from ontology_utils import assign_ids, get_id_prefix
 from schemas import (
     KnowledgeGraph,
     EntityExtractionResult,
@@ -60,12 +61,9 @@ def _entity_extraction_agent(
     Improvement  — receives existing KG + judge feedback; returns only the
                    delta (new entities to add, IDs to remove).
 
-    id_seed_kg : optional KG used ONLY for computing the next stable ID per
-                 entity type via render_with_ontology. When provided it
-                 overrides existing_kg for ID seeding. Use this when the
-                 corroboration pipeline needs to seed IDs from the combined
-                 history + doc KG while only showing the doc-so-far entities
-                 as "existing" in the improvement prompt.
+    id_seed_kg : KG used for deterministic ID assignment. Must contain ALL
+                 known entities (history + doc-so-far) so new IDs never clash.
+                 Falls back to existing_kg if not provided.
     """
     ontology_subset = {k: v for k, v in entity_ontology.items() if k in entity_types}
     is_improvement  = existing_kg is not None and judge_feedback is not None
@@ -81,7 +79,6 @@ def _entity_extraction_agent(
             "entity_extraction_improvement.j2",
             entity_ontology=ontology_subset,
             relationship_ontology={},
-            existing_kg=id_seed_kg or existing_kg,
             entity_types=entity_types,
             ontology_subset=ontology_subset,
             existing_for_types=existing_for_types,
@@ -99,7 +96,6 @@ def _entity_extraction_agent(
             "entity_extraction_initial.j2",
             entity_ontology=ontology_subset,
             relationship_ontology={},
-            existing_kg=id_seed_kg or existing_kg,   # use id_seed_kg for ID counter if provided
             ontology_subset=ontology_subset,
             document_text=document_text,
             custom_instructions=custom_instructions,
@@ -107,6 +103,15 @@ def _entity_extraction_agent(
 
     raw    = call_llm(system_prompt, user_prompt, label=agent_name)
     result = parse_and_validate(raw, EntityExtractionResult, label=agent_name)
+
+    # Assign deterministic IDs — LLM-provided IDs are discarded
+    seed = id_seed_kg or existing_kg
+    if result.entities:
+        new_entities, _id_map = assign_ids(result.entities, seed, entity_ontology)
+        result = EntityExtractionResult(
+            entities=new_entities,
+            entities_to_remove=result.entities_to_remove,
+        )
 
     mode = "improvement" if is_improvement else "initial"
     print(f"  [{agent_name}] {mode} → entities={len(result.entities)}  to_remove={len(result.entities_to_remove)}")

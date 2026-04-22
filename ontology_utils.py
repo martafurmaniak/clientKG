@@ -159,6 +159,57 @@ def get_next_id_map(entity_ontology: dict, kg=None) -> dict[str, str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Deterministic ID assignment
+# ─────────────────────────────────────────────────────────────────────────────
+
+def assign_ids(
+    entities: list,
+    seed_kg,
+    entity_ontology: dict,
+) -> list:
+    """
+    Replace every LLM-assigned entity ID with a stable, collision-free one.
+
+    Algorithm:
+      1. Build the current max numeric suffix per prefix from seed_kg.entities
+         (which must include ALL known entities — history + any doc-so-far).
+      2. For each incoming entity, derive its prefix from entity_ontology,
+         increment the counter, and assign the new ID.
+      3. Rewrite any relationship source/target references inside the same
+         batch to use the new IDs (not applicable here — relationships are
+         handled separately — but we return a mapping for callers that need it).
+
+    Returns the entities list with IDs replaced in-place (new objects, immutable).
+    Also returns an old_id → new_id mapping so relationship source/target
+    references can be updated by the caller if needed.
+    """
+    import re as _re
+    from collections import defaultdict
+
+    # Seed counters from all existing entities
+    max_counts: dict[str, int] = defaultdict(int)
+    for e in (seed_kg.entities if seed_kg else []):
+        prefix = get_id_prefix(e.type)
+        m = _re.search(r"(\d+)$", e.id)
+        if m:
+            n = int(m.group(1))
+            if n > max_counts[prefix]:
+                max_counts[prefix] = n
+
+    id_map: dict[str, str] = {}   # old_id → new_id
+    result = []
+    for entity in entities:
+        prefix  = get_id_prefix(entity.type)
+        max_counts[prefix] += 1
+        new_id  = f"{prefix}{max_counts[prefix]}"
+        old_id  = entity.id
+        id_map[old_id] = new_id
+        result.append(entity.model_copy(update={"id": new_id}))
+
+    return result, id_map
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Full ontology serialisation for prompts
 # ─────────────────────────────────────────────────────────────────────────────
 

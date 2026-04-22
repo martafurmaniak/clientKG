@@ -20,7 +20,7 @@ from pathlib import Path
 
 import yaml
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
-from ontology_utils import build_entity_prompt_ontology, build_relationship_prompt_ontology, get_next_id_map
+from ontology_utils import build_entity_prompt_ontology, build_relationship_prompt_ontology
 
 _BASE_DIR   = Path(__file__).parent
 _PROMPTS_DIR = _BASE_DIR / "prompts"
@@ -95,30 +95,22 @@ def render_with_ontology(
     template_name: str,
     entity_ontology: dict,
     relationship_ontology: dict,
-    existing_kg=None,
     **variables,
 ) -> str:
     """
     Like render(), but automatically converts the raw ontology dicts into
-    the rich prompt-ready format and injects current ID state so the LLM
-    always knows the exact next ID to assign for each entity type.
+    the rich prompt-ready format (attribute definitions, from/to constraints).
 
-    Parameters
-    ──────────
-    entity_ontology       : internal entity ontology dict
-    relationship_ontology : internal relationship ontology dict
-    existing_kg           : optional KnowledgeGraph — used to compute next_id
-                            per entity type so the LLM never reuses an existing ID
+    IDs are NO LONGER injected into prompts — they are assigned deterministically
+    in Python via ontology_utils.assign_ids() after the LLM response is parsed.
 
     Templates receive:
-      entity_ontology_rich       — list[dict] with type/description/id_prefix/
-                                   next_id/attributes
+      entity_ontology_rich       — list[dict] with type/description/id_prefix/attributes
       relationship_ontology_rich — list[dict] with type/description/from/to/attributes
     """
-    next_ids = get_next_id_map(entity_ontology, kg=existing_kg)
     return render(
         template_name,
-        entity_ontology_rich=build_entity_prompt_ontology(entity_ontology, next_id_map=next_ids),
+        entity_ontology_rich=build_entity_prompt_ontology(entity_ontology),
         relationship_ontology_rich=build_relationship_prompt_ontology(relationship_ontology),
         entity_ontology=entity_ontology,
         relationship_ontology=relationship_ontology,

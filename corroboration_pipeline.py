@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 
 from schemas import KnowledgeGraph, EntityExtractionResult, RelationshipExtractionResult
+from ontology_utils import assign_ids
 from agents import kg_consolidation_agent
 from llm_utils import call_llm, parse_and_validate
 from prompt_loader import render_with_ontology, get_system_prompt
@@ -118,7 +119,6 @@ def _extract_page(
         "corroboration_extraction.j2",
         entity_ontology=entity_ontology,
         relationship_ontology=relationship_ontology,
-        existing_kg=combined_kg,   # seeds ID counter from ALL known entities
         page_summary=page_summary,
         document_summary=document_summary,
         known_entities=known_entities,
@@ -132,6 +132,17 @@ def _extract_page(
     # labels match, keep genuinely new ones. All end up in doc_kg (self-contained).
     ent_result = _resolve_against_existing(ent_result, history_kg, doc_kg_so_far)
 
+    # Assign deterministic IDs to genuinely new entities (resolved ones keep theirs).
+    # Seed from combined_kg so we never clash with any existing ID.
+    new_only = [e for e in ent_result.entities if e.id not in {x.id for x in combined_kg.entities}]
+    reused   = [e for e in ent_result.entities if e.id     in {x.id for x in combined_kg.entities}]
+    if new_only:
+        new_only_assigned, _ = assign_ids(new_only, combined_kg, entity_ontology)
+        ent_result = EntityExtractionResult(
+            entities=reused + new_only_assigned,
+            entities_to_remove=ent_result.entities_to_remove,
+        )
+
     # ── Relationship extraction ───────────────────────────────────────────────
     # Include history_kg entities in the relationship context so the LLM can
     # reference existing IDs (P1, O2, etc.) when linking to history entities.
@@ -143,7 +154,6 @@ def _extract_page(
         "corroboration_extraction.j2",
         entity_ontology=entity_ontology,
         relationship_ontology=relationship_ontology,
-        existing_kg=combined_kg,   # ID seeding uses full combined KG
         page_summary=page_summary,
         document_summary=document_summary,
         known_entities=[e.to_dict() for e in all_entities_for_rels],
